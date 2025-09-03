@@ -1,6 +1,9 @@
 #include <OScofo.hpp>
 #include <cmath>
-
+//MEHRTA
+#include <juce_core/juce_core.h>
+#include <JuceHeader.h>
+//MEHRTA
 // ╭─────────────────────────────────────╮
 // │     Construstor and Destructor      │
 // ╰─────────────────────────────────────╯
@@ -45,6 +48,7 @@ void OScofo::SetNewAudioParameters(float Sr, float FftSize, float HopSize) {
     m_HopSize = HopSize;
     m_MDP = MDP(Sr, FftSize, HopSize);
     m_MIR = MIR(Sr, FftSize, HopSize);
+    m_MDP.SetBufferSize(1024); // keep this constant unless you re-size everything offline
 }
 
 // ╭─────────────────────────────────────╮
@@ -196,6 +200,15 @@ void OScofo::SetTunning(double Tunning) {
 void OScofo::SetCurrentEvent(int Event) {
     m_MDP.SetCurrentEvent(Event);
 }
+//MEHRTA
+void OScofo::ProcessAudioInput(const std::vector<float> &audio) {
+    m_MDP.ProcessAudio(audio); // Assuming MDP handles the audio stream
+}
+// MEHRTA
+int OScofo::GetCurrentScorePosition() const {
+    return m_CurrentScorePosition;
+}
+// MEHRTA
 
 // ╭─────────────────────────────────────╮
 // │            Get Functions            │
@@ -244,6 +257,9 @@ States OScofo::GetStates() {
     }
     SetError("No states found, please use the ScoreParse first");
     return m_States;
+    DBG(" OScofo::GetStates() → EMPTY — score not loaded?");
+    SetError("No states found, please use the ScoreParse first");
+    return m_States;
 }
 
 // ─────────────────────────────────────
@@ -265,6 +281,7 @@ double OScofo::GetFFTSize() {
 double OScofo::GetHopSize() {
     return m_HopSize;
 }
+
 
 // ╭─────────────────────────────────────╮
 // │           Main Functions            │
@@ -289,18 +306,37 @@ bool OScofo::ParseScore(std::string ScorePath) {
 
     // Add States
     m_MDP.SetScoreStates(m_States);
+    m_MDP.SetBufferSize(1024);
     return true;
 }
 
 // ─────────────────────────────────────
 bool OScofo::ProcessBlock(std::vector<double> &AudioBuffer) {
-    if (!m_Score.ScoreIsLoaded()) {
+    //MEHRTA
+   /* std::cout << "[0] ProcessBlock called — Incoming buffer size = " << AudioBuffer.size() << std::endl;
+    std::cout << "[0.1] Windowing function size = " << m_MIR.GetWindowingFunctionSize() << std::endl;*/
+
+    /*if (!m_Score.ScoreIsLoaded()) {
+        std::cout << " Score is NOT loaded" << std::endl;
         return false;
-    }
+    } else {
+        std::cout << " Score is loaded" << std::endl;
+    }*/
+
+   /* std::cout << "[1] Calling m_MIR.GetDescription, AudioBuffer size = " << AudioBuffer.size() << std::endl;
+    std::cout << "    WindowingFunc size = " << m_MIR.GetWindowingFunctionSize() << std::endl;
+
+    std::cout << "[OScofo] AudioBuffer.size() = " << AudioBuffer.size() << std::endl;
+    std::cout << "[OScofo] m_WindowingFunc.size() = " << m_MIR.GetWindowingFunctionSize() << std::endl;*/
 
     m_MIR.GetDescription(AudioBuffer, m_Desc);
+
+
+
+    //std::cout << "[2] Calling m_MDP.GetEvent" << std::endl;
     m_CurrentScorePosition = m_MDP.GetEvent(m_Desc);
 
+    //std::cout << "[3] Checking for errors" << std::endl;
     if (m_MDP.HasErrors()) {
         for (auto &error : m_MDP.GetErrorMessage()) {
             SetError(error);
@@ -308,7 +344,11 @@ bool OScofo::ProcessBlock(std::vector<double> &AudioBuffer) {
         m_MDP.ClearError();
         return false;
     }
+
+
+
     return true;
 }
 
 } // namespace OScofo
+

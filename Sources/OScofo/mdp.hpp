@@ -27,6 +27,53 @@ class MDP {
     void UpdateAudioTemplate();
     void UpdatePhaseValues();
 
+    //MEHRTA
+    //  ----- public API for OScofo -----
+    void SetBufferSize(int bufSize); // sets m_BufferSize and sizes all state buffers
+    int GetBufferSize() const;       // returns current buffer size
+    int NextBufferIndex();           // ++m_TimeStep mod m_BufferSize, returns index
+    const std::vector<MacroState> &GetStates() const;
+    int m_CurrentStateIndex;
+    int m_Tau;
+    int m_SyncStr;
+    int m_Kappa;
+    double m_PsiN;
+    double m_PsiN1;
+    double m_LastPsiN;
+    std::vector<MacroState> m_States;
+    void ProcessAudio(const std::vector<float> &audio);
+    
+    void GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T);
+    /*const std::vector<MacroState> &GetStates() const {
+        return m_States;
+    }*/
+    void SetTau(double tau) {
+        m_Tau = tau;
+    }
+    void SetCurrentStateIndex(int idx) {
+        m_CurrentStateIndex = idx;
+    }
+    void SetSyncStr(double v) {
+        m_SyncStr = v;
+    }
+    void SetKappa(double v) {
+        m_Kappa = v;
+    }
+    void SetPsiN(double v) {
+        m_PsiN = v;
+    }
+    void SetPsiN1(double v) {
+        m_PsiN1 = v;
+    }
+    void SetLastPsiN(double v) {
+        m_LastPsiN = v;
+    }
+    double GetPsiN() const {
+        return m_PsiN;
+    }
+    // MEHRTA
+    
+
     // Config Functions
     void SetPitchTemplateSigma(double f);
     void SetHarmonics(int i);
@@ -39,7 +86,7 @@ class MDP {
     int GetTunning();
     ActionVec GetEventActions(int Index);
 
-    std::vector<MacroState> GetStates();
+    //std::vector<MacroState> GetStates();
     MacroState GetState(int Index);
     double GetKappa();
     void AddState(MacroState state);
@@ -63,6 +110,7 @@ class MDP {
     void ClearError();
 
   private:
+
     // Config
     double m_MinEntropy = 0;
 
@@ -72,16 +120,16 @@ class MDP {
     double m_HopSize;
     double m_Harmonics = 5;
     double m_dBTreshold = -55;
-    int m_BufferSize = 1000;
+    //int m_BufferSize = 1000;
 
     // Events
     double m_Tunning = 440;
-    int m_CurrentStateIndex = -1;
+    //int m_CurrentStateIndex = -1;
 
     // Time
     double m_SyncStrength = 0.5;
     double m_PhaseCoupling = 0.5;
-    double m_SyncStr = 0;
+    //double m_SyncStr = 0;
     double m_TimeInPrevEvent = 0;
 
     double m_LastTn = 0;
@@ -89,12 +137,12 @@ class MDP {
     double m_CurrentStateOnset = 0;
     int m_MaxScoreState = 0;
 
-    int m_Tau = 0;
-    double m_LastPsiN = 0;
-    double m_PsiN = 0;
-    double m_PsiN1 = 0;
+    //int m_Tau = 0;
+    //double m_LastPsiN = 0;
+    //double m_PsiN = 0;
+    //double m_PsiN1 = 0;
     double m_BPM = 0;
-    double m_Kappa = 1;
+    //double m_Kappa = 1;
     double m_MaxAheadSeconds;
     double m_BeatsAhead = 1;
     double m_NormAlpha = 1;
@@ -114,13 +162,23 @@ class MDP {
     int GetMaxUForJ(MacroState &StateJ);
 
     // Pitch
-    std::vector<MacroState> m_States;
+    //std::vector<MacroState> m_States;
     double m_PitchTemplateSigma = 0.5;
     double m_PitchScalingFactor = 0.5; // TODO: How should I call this?
     std::unordered_map<double, PitchTemplateArray> m_PitchTemplates;
 
     // Audio Observations
-    void GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T);
+    // MEHRTA
+    std::vector<MacroState> states;
+    //void GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T);
+    int m_BufferSize = 1024; // ring buffer length for Obs
+    int m_TimeStep = 0;      // increments per ProcessBlock (used if you prefer not to pass T)
+
+    // Optional: a helper to bulk-size all state buffers
+    void EnsureAllStateBuffersSized(int bufSize);
+    void EnsureStateBuffersSized(MacroState &st, int bufSize);
+    //MEHRTA
+    
     void BuildPitchTemplate(double Freq);
     Description m_Desc;
 

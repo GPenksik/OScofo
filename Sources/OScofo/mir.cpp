@@ -142,6 +142,11 @@ void MIR::GetRMS(std::vector<double> &In, Description &Desc) {
         Desc.Silence = false;
     }
 }
+//MEHRTA
+size_t MIR::GetWindowingFunctionSize() const {
+    return m_WindowingFunc.size();
+}
+//MEHRTA
 
 // ─────────────────────────────────────
 void MIR::GetFFTDescriptions(std::vector<double> &In, Description &Desc) {
@@ -214,19 +219,59 @@ void MIR::GetSpectralFlux(Description &Desc) {
 // │            Main Function            │
 // ╰─────────────────────────────────────╯
 void MIR::GetDescription(std::vector<double> &In, Description &Desc) {
-    // apply windowing function
-    for (size_t i = 0; i < (size_t)m_FftSize; i++) {
-        In[i] *= m_WindowingFunc[i];
+    const int N = static_cast<int>(In.size());
+    const int W = static_cast<int>(m_WindowingFunc.size());
+
+    if (N < W) {
+        std::cout << "[MIR] Frame too short (" << N << "), expected " << W << "\n";
+        return;
+    }
+    if (N > W) {
+        std::cout << "[MIR] Frame too long! " << N << " vs expected " << W << "\n";
+        throw std::logic_error("Frame is too long for Windowing Function");
     }
 
-    GetLoudness(In, Desc);
-    GetRMS(In, Desc);
-    GetFFTDescriptions(In, Desc);
+    std::vector<double> windowed(static_cast<size_t>(W));
+    for (int i = 0; i < W; ++i) {
+        windowed[static_cast<size_t>(i)] = In[static_cast<size_t>(i)] * m_WindowingFunc[static_cast<size_t>(i)];
+    }
 
-    // after FFT, get most descriptors
-    bool m_SpectralFlux = true; // TODO: This must be controled inside MDP
-    if (m_SpectralFlux) {
-        GetSpectralFlux(Desc);
+    try {
+        std::cout << "[MIR] Calling GetLoudness...\n";
+        GetLoudness(windowed, Desc);
+        std::cout << "[MIR] GetLoudness OK\n";
+
+        std::cout << "[MIR] Calling GetRMS...\n";
+        GetRMS(windowed, Desc);
+        std::cout << "[MIR] GetRMS OK\n";
+
+        std::cout << "[MIR] Calling GetFFTDescriptions...\n";
+        try {
+            std::cout << "[MIR][FFT] frameLen=" << W << " windowingFunc=" << m_WindowingFunc.size() << "\n";
+            GetFFTDescriptions(windowed, Desc);
+            double sumNorm = 0.0;
+            for (double v : Desc.NormSpectralPower)
+                sumNorm += v;
+
+            std::cout << "[MIR] dB=" << Desc.dB << " StdDev=" << Desc.StdDev << " Flux=" << Desc.SpectralFlux << " NormSum=" << sumNorm << std::endl;
+
+            std::cout << "[MIR] GetFFTDescriptions OK\n";
+        } catch (const std::length_error &e) {
+            std::cout << "[MIR][FFT] length_error: " << e.what() << "\n";
+            throw;
+        } catch (const std::exception &e) {
+            std::cout << "[MIR][FFT] exception: " << e.what() << "\n";
+            throw;
+        }
+
+        if (m_SpectralFlux) {
+            std::cout << "[MIR] Calling GetSpectralFlux...\n";
+            GetSpectralFlux(Desc);
+            std::cout << "[MIR] GetSpectralFlux OK\n";
+        }
+    } catch (const std::exception &e) {
+        std::cout << "[MIR] Exception inside MIR::GetDescription: " << e.what() << "\n";
+        throw;
     }
 }
 } // namespace OScofo

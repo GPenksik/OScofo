@@ -20,6 +20,10 @@ class MIR {
     MIR(float Sr, float WindowSize, float HopSize);
     ~MIR();
 
+    //MEHRTA
+    size_t GetWindowingFunctionSize() const;
+    
+    //MEHRTA
     void SetdBTreshold(double dB);
     void GetDescription(std::vector<double> &In, Description &Desc);
     void GetLoudness(std::vector<double> &In, Description &Desc);
@@ -34,6 +38,9 @@ class MIR {
   private:
     // Helpers
     std::vector<double> m_WindowingFunc;
+    //MEHRTA
+    bool m_SpectralFlux = true;
+    //MEHRTA
     double Mtof(double Note, double Tunning);
     double Ftom(double Freq, double Tunning);
     double Freq2Bin(double freq, double n, double Sr);

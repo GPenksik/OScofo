@@ -6,6 +6,18 @@
 #include <boost/math/special_functions/bessel.hpp>
 #include <numeric>
 
+
+
+
+
+//MEHRTA
+#include <iostream>
+#include <JuceHeader.h>
+
+
+using namespace juce;
+
+
 namespace OScofo {
 
 /*
@@ -82,38 +94,90 @@ ActionVec MDP::GetEventActions(int Index) {
     return State.Actions;
 }
 
+
+//MEHRTA
+void MDP::EnsureStateBuffersSized(MacroState &st, int bufSize) {
+    if ((int)st.Obs.size() != bufSize)
+        st.Obs.assign((size_t)bufSize, 0.0);
+
+    // Many places read State.Forward[bufferIndex] (e.g., lines ~764, 807, 820)
+    if ((int)st.Forward.size() != bufSize)
+        st.Forward.assign((size_t)bufSize, 0.0);
+
+    for (auto &as : st.SubStates) {
+        if ((int)as.Obs.size() != bufSize)
+            as.Obs.assign((size_t)bufSize, 0.0);
+    }
+}
+
+void MDP::EnsureAllStateBuffersSized(int bufSize) {
+    if (bufSize <= 0)
+        bufSize = 1024;
+    for (auto &st : m_States)
+        EnsureStateBuffersSized(st, bufSize);
+}
+//MEHRTA
 // ─────────────────────────────────────
 void MDP::SetScoreStates(States ScoreStates) {
     if (ScoreStates.size() == 0) {
         SetError("ScoreStates is empty, add some events to the score");
         return;
     }
+    //MEHRTA
+    std::cout << " SetScoreStates: Received " << ScoreStates.size() << " MacroStates" << std::endl;
+    std::cout << "   m_BufferSize = " << m_BufferSize << std::endl;
 
+    for (size_t i = 0; i < ScoreStates.size(); ++i) {
+        const auto &macro = ScoreStates[i];
+        std::cout << "   MacroState[" << i << "] BPM = " << macro.BPMExpected << ", SubStates = " << macro.SubStates.size()
+                  << ", Obs.size = " << macro.Obs.size() << std::endl;
+
+        for (size_t j = 0; j < macro.SubStates.size(); ++j) {
+            const auto &micro = macro.SubStates[j];
+            std::cout << "    └── SubState[" << j << "] Freq = " << micro.Freq << ", Obs.size = " << micro.Obs.size() << std::endl;
+        }
+    }
+    //MEHRTA
     m_States.clear();
     m_States = ScoreStates;
 
-    for (MacroState &State : m_States) {
-        State.Obs.resize(m_BufferSize + 1, 0);
-        State.Forward.resize(m_BufferSize + 1, 0);
-        for (AudioState &MicroState : State.SubStates) {
-            MicroState.Obs.resize(m_BufferSize + 1, 0);
-            MicroState.Forward.resize(m_BufferSize + 1, 0);
-        }
-    }
+    //MEHRTA
+     std::cout << " ScoreStates copied. Resizing Obs/Forward buffers..." << std::endl;
+    //MEHRTA
 
-    m_CurrentStateIndex = -1;
-    m_Kappa = 1;
-    m_BPM = m_States[0].BPMExpected;
-    m_PsiN = (double)60.0f / m_States[0].BPMExpected;
-    m_PsiN1 = (double)60.0f / m_States[0].BPMExpected;
-    m_LastPsiN = (double)60.0f / m_States[0].BPMExpected;
-    m_BeatsAhead = m_States[0].BPMExpected / 60 * m_SecondsAhead;
-    m_CurrentStateIndex = -1;
-    m_SyncStr = 0;
+    //MEHRTA
+     if (m_BufferSize <= 0) {
+         std::cerr << " ERROR: m_BufferSize is invalid = " << m_BufferSize << std::endl;
+         return;
+     }
+     std::cout << " Resizing buffers with m_BufferSize = " << m_BufferSize << std::endl;
+    //MEHRTA
+     EnsureAllStateBuffersSized(m_BufferSize);
+    // MEHRTA
+    std::cout << " Resize done. Initializing timing params..." << std::endl;
+    // MEHRTA
+    m_CurrentStateIndex = 0;
+    m_Kappa = 1.0;
+
+    double bpm = 120.0;
+    if (!m_States.empty() && m_States[0].BPMExpected > 1e-6)
+        bpm = m_States[0].BPMExpected;
+
+    m_BPM = bpm;
+    m_PsiN = 60.0 / bpm;
+    m_PsiN1 = 60.0 / bpm;
+    m_LastPsiN = 60.0 / bpm;
+    m_BeatsAhead = (bpm / 60.0) * m_SecondsAhead;
+    m_SyncStr = 0.0;
 
     UpdateAudioTemplate();
     UpdatePhaseValues();
 }
+//MEHRTA
+const std::vector<MacroState> &MDP::GetStates() const {
+    return m_States;
+}
+//MEHRTA
 
 // ─────────────────────────────────────
 void MDP::BuildPitchTemplate(double Freq) {
@@ -181,6 +245,48 @@ void MDP::UpdatePhaseValues() {
 // ╭─────────────────────────────────────╮
 // │          Set|Get Functions          │
 // ╰─────────────────────────────────────╯
+//MEHRTA
+void MDP::SetBufferSize(int bufSize) {
+    if (bufSize <= 0 || bufSize > 16384)
+        bufSize = 1024;
+    m_BufferSize = bufSize;
+    EnsureAllStateBuffersSized(m_BufferSize); // private helper
+    m_TimeStep = 0;                           // optional reset
+}
+
+int MDP::GetBufferSize() const {
+    return (m_BufferSize > 0) ? m_BufferSize : 1024;
+}
+
+int MDP::NextBufferIndex() {
+    if (m_BufferSize <= 0)
+        m_BufferSize = 1024;
+    m_TimeStep = (m_TimeStep + 1) % m_BufferSize;
+    return m_TimeStep;
+}
+//MEHRTA
+
+//MEHRTA
+
+void MDP::ProcessAudio(const std::vector<float> &audio) {
+    // TODO: Replace this with real audio feature extraction
+    std::cout << "[MDP] Received audio buffer with " << audio.size() << " samples." << std::endl;
+
+    // Example: Print the first 5 samples
+    for (int i = 0; i < std::min(5, (int)audio.size()); ++i) {
+        std::cout << "Sample[" << i << "]: " << audio[i] << std::endl;
+    }
+
+    // Placeholder: You might want to call onset detection / pitch extraction here
+
+    // Optional: update internal buffer/index if needed
+}
+// MEHRTA
+
+
+
+
+
 void MDP::ClearStates() {
     m_States.clear();
 }
@@ -330,6 +436,8 @@ int MDP::GetMaxJIndex(int StateIndex) {
 
 // ─────────────────────────────────────
 double MDP::UpdatePsiN(int StateIndex) {
+    // Just to see it tick
+    std::cout << "[TAU] before UpdatePsiN: m_Tau=" << m_Tau << " StateIndex=" << StateIndex << " Current=" << m_CurrentStateIndex << std::endl;
     if (StateIndex == m_CurrentStateIndex) {
         m_TimeInPrevEvent += m_BlockDur;
         m_Tau += 1;
@@ -357,6 +465,10 @@ double MDP::UpdatePsiN(int StateIndex) {
     // Cont (2010), Large and Palmer (1999) and Large and Jones (2002)
     MacroState &LastState = m_States[StateIndex - 1];
     MacroState &CurrentState = m_States[StateIndex];
+    if (StateIndex + 1 >= (int)m_States.size()) {
+        // clamp to last state to avoid OOB; adjust logic as you like
+        return m_PsiN; // or compute a safe fallback
+    }
     MacroState &NextState = m_States[StateIndex + 1];
 
     double IOISeconds = m_CurrentStateOnset - m_LastTn;
@@ -423,50 +535,85 @@ double MDP::UpdatePsiN(int StateIndex) {
 // │     Markov Description Process      │
 // ╰─────────────────────────────────────╯
 void MDP::GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T) {
-    std::unordered_map<double, double> PitchObs;
+    if (m_States.empty()) {
+        Logger::outputDebugString("[MDP] m_States is empty");
+        return;
+    }
 
-    for (int j = FirstStateIndex; j <= LastStateIndex; j++) {
-        if (j < 0) {
-            continue;
-        }
+    const int total = (int)m_States.size();
+    int first = FirstStateIndex;
+    int last = LastStateIndex;
+    if (first > last)
+        std::swap(first, last);
 
-        MacroState &StateJ = m_States[j];
-        int BufferIndex = (T % m_BufferSize);
-        if (StateJ.Type == NOTE) {
-            // TODO: Need to rethink this
-            double KL = 0;
-            for (AudioState AudioState : StateJ.SubStates) {
-                if (PitchObs.find(AudioState.Freq) != PitchObs.end()) {
-                    AudioState.Obs[BufferIndex] = PitchObs[AudioState.Freq];
-                    KL = PitchObs[AudioState.Freq];
+    if (first < 0 || last < 0 || first >= total || last >= total) {
+        juce::String msg;
+        msg << "[MDP] Invalid state range: first=" << first << " last=" << last << " total=" << total;
+        Logger::outputDebugString(msg);
+        return;
+    }
+
+    // Ensure ring size sane & buffers pre-sized
+    if (m_BufferSize <= 0 || m_BufferSize > 16384)
+        m_BufferSize = 1024;
+    EnsureAllStateBuffersSized(m_BufferSize);
+
+    if (T < 0)
+        T = 0;
+    const int bufferIndex = T % m_BufferSize;
+
+    std::unordered_map<int, double> pitchCache; // rounded freq -> KL
+
+    for (int j = first; j <= last; ++j) {
+        MacroState &st = m_States[j];
+
+        if (st.Type == NOTE) {
+            double KL = 0.0;
+            for (AudioState &as : st.SubStates) {
+                const int f = (int)std::llround(as.Freq);
+                auto it = pitchCache.find(f);
+                if (it != pitchCache.end()) {
+                    as.Obs[(size_t)bufferIndex] = it->second;
+                    KL = it->second;
                     continue;
                 }
-                if (AudioState.Type == NOTE) {
-                    KL = GetPitchSimilarity(AudioState.Freq);
-                    PitchObs[AudioState.Freq] = KL;
-                    AudioState.Obs[BufferIndex] = KL;
+                if (as.Type == NOTE) {
+                    KL = GetPitchSimilarity(as.Freq);
+                    pitchCache[f] = KL;
+                    as.Obs[(size_t)bufferIndex] = KL;
+                    std::cout << "[OBS] j=" << j << " bufIdx=" << bufferIndex << " Obs=" << st.Obs[(size_t)bufferIndex]
+                              << " SubStates=" << st.SubStates.size() << std::endl;
                 }
             }
-            StateJ.Obs[BufferIndex] = KL;
+            st.Obs[(size_t)bufferIndex] = KL;
+            // log AFTER writing st.Obs
+            std::cout << "[OBS] j=" << j << " bufIdx=" << bufferIndex << " Obs=" << st.Obs[(size_t)bufferIndex]
+                      << " SubStates=" << st.SubStates.size() << std::endl;
+        } else if (st.Type == TRILL) {
+            double best = 0.0;
+            for (AudioState &as : st.SubStates) {
+                const int f = (int)std::llround(as.Freq);
+                double KL = 0.0;
 
-        } else if (StateJ.Type == REST) {
-            // StateJ.Obs[BufferIndex] = Desc.Amp;
+                auto it = pitchCache.find(f);
+                if (it != pitchCache.end()) {
+                    KL = it->second;
+                } else {
+                    KL = GetPitchSimilarity(as.Freq);
+                    pitchCache[f] = KL;
+                }
 
-        } else if (StateJ.Type == TRILL) {
-            double bestProb = 0;
-            for (AudioState AudioState : StateJ.SubStates) {
-                if (PitchObs.find(AudioState.Freq) != PitchObs.end()) {
-                    AudioState.Obs[BufferIndex] = PitchObs[AudioState.Freq];
-                    continue;
-                }
-                double KL = GetPitchSimilarity(AudioState.Freq);
-                if (KL > bestProb) {
-                    bestProb = KL;
-                }
-                AudioState.Obs[BufferIndex] = KL;
+                if (KL > best)
+                    best = KL;
+                as.Obs[(size_t)bufferIndex] = KL;
             }
-            StateJ.Obs[BufferIndex] = bestProb;
+            st.Obs[(size_t)bufferIndex] = best;
+        } else {
+            // REST/others: optional
+            // st.Obs[(size_t)bufferIndex] = 0.0;
         }
+        std::cout << "[OBS] j=" << j << " bufIdx=" << bufferIndex << " st.Obs=" << st.Obs[(size_t)bufferIndex] << " SubStates=" << st.SubStates.size()
+                  << std::endl;
     }
 }
 
@@ -526,12 +673,11 @@ std::vector<double> MDP::GetInitialDistribution() {
 
 // ─────────────────────────────────────
 double MDP::GetTransProbability(int i, int j) {
-    // simplest markov
-    if (i + 1 == j) {
-        return 1;
-    } else {
-        return 0;
-    }
+    if (i == j)
+        return 0.1; // can stay
+    if (i + 1 == j)
+        return 1.0; // prefer forward
+    return 0.0;
 }
 
 // ─────────────────────────────────────
@@ -569,7 +715,7 @@ double MDP::SemiMarkov(MacroState &StateJ, int CurrentState, int j, int T, int b
                     continue;
                 }
                 MacroState &StateI = m_States[i];
-                int PrevIndex = (T - u) % m_BufferSize;
+                int PrevIndex = (bufferIndex - u + m_BufferSize) % m_BufferSize;
                 if (i != j) {
                     MaxTrans = std::max(MaxTrans, GetTransProbability(i, j) * StateI.Forward[PrevIndex]);
                 } else {
@@ -623,9 +769,13 @@ double CalculateEntropy(const std::vector<double> &probs) {
 
 // ─────────────────────────────────────
 int MDP::Inference(int CurrentState, int MaxState, int T) {
+    //MEHRTA
+    std::cout << "\n Inference CALLED — CurrentState = " << CurrentState << ", MaxState = " << MaxState << ", T = " << T << std::endl;
+    //MEHRTA
     double MaxValue = -std::numeric_limits<double>::infinity();
     int BestState = CurrentState;
     int bufferIndex = T % m_BufferSize;
+    std::cout << "[INF] T=" << T << " bufIdx=" << bufferIndex << " Cur=" << CurrentState << " Max=" << MaxState << std::endl;
 
     for (int j = CurrentState; j <= MaxState; j++) {
         if ((j < 0) || ((size_t)j >= m_States.size()))
@@ -641,8 +791,13 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
 
         if (StateJ.Markov == SEMIMARKOV) {
             StateJ.Forward[bufferIndex] = SemiMarkov(StateJ, CurrentState, j, T, bufferIndex);
+            // MEHRTA
+            std::cout << "   Forward[" << j << "] = " << m_States[j].Forward[bufferIndex] << "  (Markov type = " << m_States[j].Markov << ")"
+                      << std::endl;
+            // MEHRTA
         } else if (StateJ.Markov == MARKOV) {
             StateJ.Forward[bufferIndex] = Markov(StateJ, CurrentState, j, T, bufferIndex);
+            std::cout << "  [FWD] j=" << j << " Forward=" << StateJ.Forward[bufferIndex] << " Obs=" << StateJ.Obs[bufferIndex] << std::endl;
         }
     }
 
@@ -652,8 +807,19 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
         if ((j < 0) || ((size_t)j >= m_States.size()))
             continue;
         SumForward += m_States[j].Forward[bufferIndex];
+        //MEHRTA
+        std::cout << "  [SUM] SumForward=" << SumForward << std::endl;
+        //MEHRTA
     }
-
+    if (SumForward <= 0.0) {
+        std::cout << "  [SUM] SumForward=0 -> keeping current state\n";
+        // Diagnostic: print a couple Obs values at this bufferIndex
+        if (CurrentState >= 0 && (size_t)CurrentState < m_States.size()) {
+            auto &st = m_States[CurrentState];
+            std::cout << "  [OBS] st.Obs[" << (T % m_BufferSize) << "]=" << st.Obs[T % m_BufferSize] << "\n";
+        }
+        return CurrentState;
+    }
     // Normalization
     std::vector<double> Probs;
     for (int j = CurrentState; j <= MaxState; j++) {
@@ -664,6 +830,9 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
         if (T != 0) {
             double Forward = StateJ.Forward[bufferIndex];
             StateJ.Forward[bufferIndex] = Forward / SumForward;
+            //MEHRTA
+            std::cout << "   Norm Forward[" << j << "] = " << StateJ.Forward[bufferIndex] << std::endl;
+            //MEHRTA
         }
         if (StateJ.Forward[bufferIndex] > MaxValue) {
             MaxValue = StateJ.Forward[bufferIndex];
@@ -678,6 +847,10 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
     double Conf = 1.0 - (Entropy / maxEntropy);
     // printf("config: %d, %f, %f\n", BestState, entropy, confidence);
 
+    //MEHRTA
+    std::cout << "   Entropy = " << Entropy << ", Confidence = " << Conf << ", MinEntropy = " << m_MinEntropy << std::endl;
+    //MEHRTA
+
     if (m_MinEntropy > 0) {
         if (Conf > m_MinEntropy) {
             return BestState;
@@ -685,15 +858,24 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
             return CurrentState;
         }
     }
+    //MEHRTA
+    std::cout << " BestState selected = " << BestState << "\n" << std::endl;
+    //MEHRTA
     return BestState;
 }
 
 // ─────────────────────────────────────
 int MDP::GetEvent(Description &Desc) {
+    //MEHRTA
+    std::cout << "\n GetEvent CALLED — Tau = " << m_Tau << ", m_CurrentStateIndex = " << m_CurrentStateIndex << std::endl;
+    //MEHRTA
     m_Desc = Desc;
     m_MaxScoreState = GetMaxJIndex(m_CurrentStateIndex);
-    GetAudioObservations(m_CurrentStateIndex - 1, m_MaxScoreState, m_Tau);
-
+    const int t = NextBufferIndex(); // 0..m_BufferSize-1 globally
+    GetAudioObservations(m_CurrentStateIndex, m_MaxScoreState, t);
+    //MEHRTA
+    std::cout << " Observations updated from j = " << m_CurrentStateIndex << " to j = " << m_MaxScoreState << std::endl;
+    //MEHRTA
     if (Desc.Silence || (size_t)m_CurrentStateIndex == m_States.size()) {
         if (m_CurrentStateIndex == -1) {
             return 0;
@@ -702,8 +884,14 @@ int MDP::GetEvent(Description &Desc) {
     }
 
     if (m_Tau == 0) {
+        //MEHRTA
+        std::cout << " Setting initial distribution (Tau = 0)" << std::endl;
+        //MEHRTA
         std::vector<double> InitialProb = GetInitialDistribution();
         for (int j = m_CurrentStateIndex; j < m_MaxScoreState; j++) {
+            //MEHRTA
+            std::cout << "   StateJ.InitProb[" << j << "] = " << InitialProb[j - m_CurrentStateIndex] << std::endl;
+            //MEHRTA
             if (j < 0) {
                 continue;
             }
@@ -712,7 +900,7 @@ int MDP::GetEvent(Description &Desc) {
         }
     }
 
-    int StateIndex = Inference(m_CurrentStateIndex, m_MaxScoreState, m_Tau);
+    int StateIndex = Inference(m_CurrentStateIndex, m_MaxScoreState, t);
     if (StateIndex == -1) {
         return 0;
     }
