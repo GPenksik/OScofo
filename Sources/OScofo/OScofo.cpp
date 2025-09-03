@@ -43,8 +43,27 @@ void OScofo::SetNewAudioParameters(float Sr, float FftSize, float HopSize) {
     m_Sr = Sr;
     m_FFTSize = FftSize;
     m_HopSize = HopSize;
-    m_MDP = MDP(Sr, FftSize, HopSize);
-    m_MIR = MIR(Sr, FftSize, HopSize);
+
+    // Properly reconstruct MDP and MIR objects to avoid FFTW plan conflicts
+    // First, explicitly destroy the old objects to clean up FFTW plans
+    m_MDP.~MDP();
+    m_MIR.~MIR();
+    
+    // Then reconstruct them in-place with new parameters
+    new (&m_MDP) MDP(Sr, FftSize, HopSize);
+    new (&m_MIR) MIR(Sr, FftSize, HopSize);
+    
+    // Check for errors after reconstruction
+    if (m_MIR.HasErrors() || m_MDP.HasErrors()) {
+        for (auto &error : m_MIR.GetErrorMessage()) {
+            SetError(error);
+        }
+        m_MIR.ClearError();
+        for (auto &error : m_MDP.GetErrorMessage()) {
+            SetError(error);
+        }
+        m_MDP.ClearError();
+    }
 }
 
 // ╭─────────────────────────────────────╮
@@ -280,9 +299,9 @@ bool OScofo::ParseScore(std::string ScorePath) {
         return false;
     }
 
-    m_FFTSize = m_Score.GetFFTSize();
-    m_HopSize = m_Score.GetHopSize();
-    SetNewAudioParameters(m_Sr, m_FFTSize, m_HopSize);
+    double new_FFTSize = m_Score.GetFFTSize();
+    double new_HopSize = m_Score.GetHopSize();
+    SetNewAudioParameters(m_Sr, new_FFTSize, new_HopSize);
 
     // Parse Config
     m_MDP.SetPitchTemplateSigma(m_Score.GetPitchTemplateSigma());
@@ -294,6 +313,12 @@ bool OScofo::ParseScore(std::string ScorePath) {
 
 // ─────────────────────────────────────
 bool OScofo::ProcessBlock(std::vector<double> &AudioBuffer) {
+#if COMPILE_WITH_MATLAB
+    if (!m_MDP.mh->ensureMatlabConnection())
+    { 
+        return false;
+    }
+#endif
     if (!m_Score.ScoreIsLoaded()) {
         return false;
     }

@@ -6,6 +6,16 @@
 #include <boost/math/special_functions/bessel.hpp>
 #include <numeric>
 
+// Define math constants in case they get undefined by other headers
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#if COMPILE_WITH_MATLAB
+// #include "MatlabEngine.hpp"
+// using namespace matlab::engine;
+#endif
+
 namespace OScofo {
 
 /*
@@ -45,6 +55,12 @@ MDP::MDP(double Sr, double FFTSize, double HopSize) {
     m_TimeInPrevEvent = 0;
 
     SetTunning(440);
+
+    // Initialize HDF5 logger
+    dataLogger = std::make_unique<DataLogger>();
+#if COMPILE_WITH_MATLAB
+    mh = std::make_unique<MatlabHelper>();
+#endif
 }
 
 // ╭─────────────────────────────────────╮
@@ -329,14 +345,32 @@ int MDP::GetMaxJIndex(int StateIndex) {
 }
 
 // ─────────────────────────────────────
+/**
+ * @brief UpdatePsiN - Core temporal modeling function implementing anticipatory synchronization
+ *
+ * This function implements the Antescofo anticipatory score following algorithm's temporal model,
+ * based on Cont (2010), Large & Palmer (1999), and Large & Jones (2002). It performs:
+ * 1. Period estimation (PsiN) - the current beat period estimate
+ * 2. Phase coupling - synchronization between observed and expected phases
+ * 3. Predictive updating - anticipatory adjustment of future event timing
+ *
+ * The algorithm maintains a dynamic estimate of the musical tempo (period) that adapts
+ * to the performer's tempo changes while using phase-locking to maintain synchronization.
+ *
+ * @param StateIndex Current score position being processed
+ * @return PsiN1 - Updated period estimate for next beat/event
+ */
 double MDP::UpdatePsiN(int StateIndex) {
+    // Case 1: Still in same state - just accumulate time and frame count
     if (StateIndex == m_CurrentStateIndex) {
-        m_TimeInPrevEvent += m_BlockDur;
-        m_Tau += 1;
-        return m_PsiN;
+        m_TimeInPrevEvent += m_BlockDur; // Accumulate time spent in current state
+        m_Tau += 1;                      // Increment frame counter (for Semi-Markov)
+        return m_PsiN;                   // Return current period estimate unchanged
     } else {
+        // Case 2: First event (initialization)
         if (StateIndex == 0) {
-            double PsiK = 60 / m_States[0].BPMExpected;
+            // Initialize all temporal variables from score's expected BPM
+            double PsiK = 60 / m_States[0].BPMExpected; // Convert BPM to period in seconds
             m_LastPsiN = PsiK;
             m_PsiN = PsiK;
             m_PsiN1 = PsiK;
@@ -346,77 +380,134 @@ double MDP::UpdatePsiN(int StateIndex) {
             m_LastTn = 0;
             m_TimeInPrevEvent = 0;
             m_Tau = 0;
+            m_States[1].IOIHatPhiN = m_States[1].Duration; // Initial expected phase for next event
             return m_PsiN;
         } else {
+            // Case 3: Transitioning to new state - update onset timing
             m_TimeInPrevEvent += m_BlockDur;
-            m_LastTn = m_CurrentStateOnset;
-            m_CurrentStateOnset += m_TimeInPrevEvent;
+            m_LastTn = m_CurrentStateOnset;           // Store previous onset time
+            m_CurrentStateOnset += m_TimeInPrevEvent; // Calculate new onset time
         }
     }
+    std::vector<float> PhiNDebugVector;
 
-    // Cont (2010), Large and Palmer (1999) and Large and Jones (2002)
-    MacroState &LastState = m_States[StateIndex - 1];
-    MacroState &CurrentState = m_States[StateIndex];
-    MacroState &NextState = m_States[StateIndex + 1];
+    // TEMPORAL MODEL IMPLEMENTATION
+    // Following Cont (2010), Large and Palmer (1999) and Large and Jones (2002)
 
+    // Get references to relevant score states for phase calculations
+    MacroState &LastState = m_States[StateIndex - 1]; // Previous event
+    MacroState &CurrentState = m_States[StateIndex];  // Current event
+    MacroState &NextState = m_States[StateIndex + 1]; // Next event
+
+    // 1. INTER-ONSET INTERVAL (IOI) CALCULATION
+    // Calculate observed time interval between consecutive events
     double IOISeconds = m_CurrentStateOnset - m_LastTn;
-    double LastPhiN = LastState.IOIPhiN;
-    double LastHatPhiN = LastState.IOIHatPhiN;
-    double HatPhiN = CurrentState.IOIHatPhiN;
+    // Extract phase information from previous calculations
+    double LastPhiN = LastState.IOIPhiN;       // Previous observed phase
+    double LastHatPhiN = LastState.IOIHatPhiN; // Previous expected phase
+    double HatPhiN = CurrentState.IOIHatPhiN;  // Current expected phase
+    // Calculate expected phase progression based on current period estimate
     double PhiNExpected = LastPhiN + ((m_CurrentStateOnset - m_LastTn) / m_PsiN);
     CurrentState.IOIHatPhiN = PhiNExpected;
     CurrentState.OnsetObserved = m_CurrentStateOnset;
 
-    // Update Variance (Cont, 2010) - Coupling Strength (Large 1999)
+    // 2. PHASE COUPLING STRENGTH ADAPTATION (Cont 2010, Large 1999)
+    // Calculate phase difference between observed and expected timing
     double PhaseDiff = (IOISeconds / m_PsiN) - HatPhiN;
+    // Update synchronization strength using exponential smoothing
+    // This adapts the coupling strength based on recent phase consistency
     double SyncStrength = m_SyncStr - m_SyncStrength * (m_SyncStr - cos(TWO_PI * PhaseDiff));
+    // Convert synchronization strength to von Mises concentration parameter
+    // Higher Kappa = stronger phase coupling = more resistant to tempo changes
     double Kappa = InverseA2(SyncStrength);
     m_SyncStr = SyncStrength;
     m_Kappa = Kappa;
 
-    // Update and Correct PhiN
+    // 3. PHASE UPDATE WITH COUPLING CORRECTION
+    // Calculate phase coupling correction term using von Mises distribution
     double FValueUpdate = CouplingFunction(LastPhiN, LastHatPhiN, Kappa);
+    // Update observed phase: natural progression + coupling correction
     double PhiN = LastPhiN + (IOISeconds / m_LastPsiN) + (m_PhaseCoupling * FValueUpdate);
-    PhiN = ModPhases(PhiN);
+    PhiN = ModPhases(PhiN); // Wrap phase to [-π, π] range
     CurrentState.PhaseObserved = PhiN;
-
-    // Prediction for next PsiN+1
+    CurrentState.IOIPhiN = PhiN; // Store for next iteration's LastPhiN
+    // 4. ANTICIPATORY PERIOD PREDICTION
+    // Calculate coupling correction for next period prediction
     double FValuePrediction = CouplingFunction(PhiN, HatPhiN, Kappa);
+    // Update period estimate: current period + coupling-based adjustment
+    // This is the core anticipatory mechanism - predicting future tempo
     double PsiN1 = m_PsiN * (1 + m_SyncStrength * FValuePrediction);
-
-    // Prediction for Next HatPhiN
+    // 5. FUTURE EVENT TIMING PREDICTION
+    // Calculate expected timing for next event based on updated period
     double Tn1 = m_CurrentStateOnset + CurrentState.Duration * PsiN1;
     double PhiN1 = ModPhases((Tn1 - m_CurrentStateOnset) / PsiN1);
     NextState.IOIHatPhiN = PhiN1;
 
-    // Update all next expected onsets
+    // Update immediate next event timing
     NextState.OnsetExpected = Tn1;
     double LastOnsetExpected = Tn1;
 
-    // the m_CurrentEvent + 1 already updated, now
-    // we update the future events to get the Sojourn Time
+    // 6. LOOKAHEAD TIMING UPDATE
+    // PhiNDebugVector.push_back(static_cast<float>(CurrentState.ScorePos));            // 1
+    // PhiNDebugVector.push_back(static_cast<float>(m_TimeInPrevEvent));       // 2
+    // PhiNDebugVector.push_back(static_cast<float>(m_LastTn));                // 3
+    // PhiNDebugVector.push_back(static_cast<float>(m_CurrentStateOnset));      // 4
+    // PhiNDebugVector.push_back(static_cast<float>(IOISeconds));               // 5
+    // PhiNDebugVector.push_back(static_cast<float>(LastPhiN));                 // 6
+    // PhiNDebugVector.push_back(static_cast<float>(LastHatPhiN));              // 7
+    // PhiNDebugVector.push_back(static_cast<float>(HatPhiN));                 // 8
+    // PhiNDebugVector.push_back(static_cast<float>(PhiNExpected));            // 9
+    // PhiNDebugVector.push_back(static_cast<float>(PhaseDiff));               // 10
+    // PhiNDebugVector.push_back(static_cast<float>(SyncStrength));            // 11
+    // PhiNDebugVector.push_back(static_cast<float>(Kappa));                   // 12
+    // PhiNDebugVector.push_back(static_cast<float>(m_SyncStr));               // 13
+    // PhiNDebugVector.push_back(static_cast<float>(FValueUpdate));            // 14
+    // PhiNDebugVector.push_back(static_cast<float>(PhiN));                   // 15
+    // PhiNDebugVector.push_back(static_cast<float>(FValuePrediction));       // 16
+    // PhiNDebugVector.push_back(static_cast<float>(PsiN1));                  // 17
+    // PhiNDebugVector.push_back(static_cast<float>(Tn1));                    // 18
+    // PhiNDebugVector.push_back(static_cast<float>(PhiN1));                  // 19
+
+    // Propagate tempo changes to future events (up to 20 events ahead)
+    // This maintains consistent timing expectations across the anticipatory window
     for (int i = m_CurrentStateIndex + 2; i < m_CurrentStateIndex + 20; i++) {
         if ((size_t)i >= m_States.size()) {
-            break;
+            PhiNDebugVector.push_back(-1.0f); // Indicate no further states
+            continue;
         }
         MacroState &FutureState = m_States[i];
         MacroState &PreviousFutureState = m_States[(i - 1)];
         double Duration = PreviousFutureState.Duration;
         double FutureOnset = LastOnsetExpected + Duration * PsiN1;
 
+        // PhiNDebugVector.push_back(static_cast<float>(FutureOnset));
         FutureState.OnsetExpected = FutureOnset;
         LastOnsetExpected = FutureOnset;
     }
 
-    // Update Values for next calls
-    m_BPM = 60.0f / m_PsiN;
-    m_LastPsiN = m_PsiN;
+    // Also log to HDF5 system
+    // logVector("PhiNDebugVector", PhiNDebugVector);
 
+    // Create list of headings in debug vector
+    // std::vector<std::string> headings = {
+    //     "TimeInPrevEvent", "LastTn", "CurrentStateOnset", "IOISeconds", "LastPhiN",
+    //     "LastHatPhiN", "HatPhiN", "PhiNExpected", "PhaseDiff", "SyncStrength",
+    //     "Kappa", "m_SyncStr", "FValueUpdate", "PhiN", "FValuePrediction",
+    //     "PsiN1", "Tn1", "PhiN1"
+    // };
+
+    // 7. STATE VARIABLE UPDATES
+    // Update global tempo tracking variables
+    m_BPM = 60.0f / m_PsiN; // Convert period back to BPM
+    m_LastPsiN = m_PsiN;    // Store previous period
+
+    // Reset frame counters when transitioning to new state
     if (StateIndex != m_CurrentStateIndex) {
         m_TimeInPrevEvent = 0;
         m_Tau = 0;
     }
-    return PsiN1;
+
+    return PsiN1; // Return updated period estimate for next iteration
 }
 
 // ╭─────────────────────────────────────╮
@@ -425,8 +516,16 @@ double MDP::UpdatePsiN(int StateIndex) {
 void MDP::GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T) {
     std::unordered_map<double, double> PitchObs;
 
+    // Create log vector
+    std::vector<double> obsKLLogVector;
+    obsKLLogVector.push_back((double)loopCounter);
+    obsKLLogVector.push_back((double)FirstStateIndex+1);
+    obsKLLogVector.push_back((double)LastStateIndex+1);
+    obsKLLogVector.push_back((double)T);
+
     for (int j = FirstStateIndex; j <= LastStateIndex; j++) {
         if (j < 0) {
+            obsKLLogVector.push_back(0.0);
             continue;
         }
 
@@ -448,7 +547,7 @@ void MDP::GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T) {
                 }
             }
             StateJ.Obs[BufferIndex] = KL;
-
+            obsKLLogVector.push_back(KL);
         } else if (StateJ.Type == REST) {
             // StateJ.Obs[BufferIndex] = Desc.Amp;
 
@@ -468,6 +567,8 @@ void MDP::GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T) {
             StateJ.Obs[BufferIndex] = bestProb;
         }
     }
+    obsKLLogVector.resize(15);
+    logVector("ObsKL", obsKLLogVector);
 }
 
 // ─────────────────────────────────────
@@ -510,6 +611,11 @@ std::vector<double> MDP::GetInitialDistribution() {
     double Sum = 0;
 
     for (int i = 0; i < Size; i++) {
+        // If i is negative, then no note has played yet. Probability is therefore 0?
+        if (m_CurrentStateIndex + i < 0) {
+            InitialProb[i] = 0;
+            continue;
+        }
         double DurProb = exp(-1 * (Dur / m_BeatsAhead));
         InitialProb[i] = DurProb;
         Dur += m_States[m_CurrentStateIndex + i].Duration; // Accumulate duration
@@ -550,46 +656,131 @@ int MDP::GetMaxUForJ(MacroState &StateJ) {
 }
 
 // ─────────────────────────────────────
+/**
+ * @brief SemiMarkov - Core Semi-Markov Forward Algorithm Implementation
+ *
+ * This function implements the Semi-Markov variant of the forward algorithm for score following,
+ * based on the Antescofo methodology (Cont 2010). Unlike standard Markov models that assume
+ * geometric duration distributions, Semi-Markov models explicitly consider state durations,
+ * making them more suitable for musical score following where note durations are important.
+ *
+ * THEORETICAL FOUNDATION:
+ * The Semi-Markov forward algorithm computes α(j,t) = P(O₁...Oₜ, Sₜ = j) where:
+ * - O₁...Oₜ are observations up to time t
+ * - Sₜ = j means we're in state j at time t
+ * - Duration u represents how long we've been in state j
+ *
+ * The key difference from regular Markov models:
+ * - Standard Markov: P(duration = d) = (1-p)^(d-1) * p (geometric distribution)
+ * - Semi-Markov: P(duration = d) = explicit survival function (more realistic for music)
+ *
+ * MUSICAL RELEVANCE:
+ * In musical score following, notes have explicit durations (quarter notes, half notes, etc.).
+ * Semi-Markov models capture this by allowing states to have realistic duration distributions
+ * rather than assuming all events are equally likely to end at any time step.
+ *
+ * @param StateJ Reference to the state we're computing forward probability for
+ * @param CurrentState Index of the earliest state in our search window
+ * @param j Index of the current state being processed (StateJ's index)
+ * @param T Current time step in the forward algorithm
+ * @param bufferIndex Circular buffer index for storing/retrieving probabilities
+ * @return Forward probability α(j,T) for state j at time T
+ */
 double MDP::SemiMarkov(MacroState &StateJ, int CurrentState, int j, int T, int bufferIndex) {
+    
+    // BASE CASE: Initial time step (T = 0)
+    // At the first time step, the forward probability is simply:
+    // α(j,0) = P(O₀|j) * P(duration ≥ 1|j) * P(initial_state = j)
     if (T == 0) {
-        return StateJ.Obs[bufferIndex] * GetSojournTime(StateJ, T + 1) * StateJ.InitProb;
-    } else {
-        double Obs = StateJ.Obs[bufferIndex];
-        double MaxAlpha = -std::numeric_limits<double>::infinity();
-        for (int u = 1; u <= std::min(T, GetMaxUForJ(StateJ)); u++) {
-            double ProbPrevObs = 1.0;
-            for (int v = 1; v < u; v++) {
-                int PrevIndex = (bufferIndex - v + m_BufferSize) % m_BufferSize;
-                ProbPrevObs *= StateJ.Obs[PrevIndex];
-            }
-            double Sur = GetSojournTime(StateJ, u);
-            double MaxTrans = -std::numeric_limits<double>::infinity();
-            for (int i = CurrentState; i <= j; i++) {
-                if (i < 0) {
-                    continue;
-                }
-                MacroState &StateI = m_States[i];
-                int PrevIndex = (T - u) % m_BufferSize;
-                if (i != j) {
-                    MaxTrans = std::max(MaxTrans, GetTransProbability(i, j) * StateI.Forward[PrevIndex]);
-                } else {
-                    // for (AudioState &SubState : StateJ.SubStates) {
-
-                    // if (SubState.Markov == MARKOV) {
-                    //     int StateSize = StateJ.SubStates.size();
-                    //     // SubState.Forward[bufferIndex] = Markov(SubState, CurrentState, j, T, bufferIndex);
-                    // }
-                    // }
-
-                    MaxTrans = std::max(MaxTrans, StateJ.Forward[PrevIndex]);
-                }
-            }
-
-            double MaxResult = ProbPrevObs * Sur * MaxTrans;
-            MaxAlpha = std::max(MaxAlpha, MaxResult);
-        }
-        return Obs * MaxAlpha;
+        return StateJ.Obs[bufferIndex] *     // Current observation probability P(O₀|j)
+               GetSojournTime(StateJ, T + 1) * // Survival probability P(duration ≥ 1|j)
+               StateJ.InitProb;               // Initial state probability P(S₀ = j)
     }
+    
+    // RECURSIVE CASE: T > 0
+    // For Semi-Markov models, we need to consider all possible durations u that we could
+    // have been in state j. The forward probability becomes:
+    // α(j,t) = P(Oₜ|j) * max_u [ P(O_{t-u+1}...O_{t-1}|j) * P(duration = u|j) * max_i α(i,t-u) * P(i→j) ]
+    
+    double Obs = StateJ.Obs[bufferIndex]; // Current observation probability P(Oₜ|j)
+    double MaxAlpha = -std::numeric_limits<double>::infinity(); // Running maximum over all durations
+    
+    // DURATION LOOP: Consider all possible durations u that we could have been in state j
+    // We iterate from u=1 (just entered state) to min(T, max_duration_for_state_j)
+    for (int u = 1; u <= std::min(T, GetMaxUForJ(StateJ)); u++) {
+        
+        // STEP 1: OBSERVATION LIKELIHOOD FOR DURATION u
+        // If we've been in state j for duration u, we need the probability of observing
+        // all observations during this period: P(O_{t-u+1}, O_{t-u+2}, ..., O_{t-1} | j)
+        // We multiply individual observation probabilities (independence assumption)
+        double ProbPrevObs = 1.0;
+        for (int v = 1; v < u; v++) {
+            int PrevIndex = (bufferIndex - v + m_BufferSize) % m_BufferSize;
+            ProbPrevObs *= StateJ.Obs[PrevIndex]; // P(O_{t-v}|j)
+        }
+        
+        // STEP 2: DURATION MODEL (SURVIVAL FUNCTION)
+        // Get the probability of staying in state j for exactly duration u
+        // This is the key difference from standard Markov models
+        double Sur = GetSojournTime(StateJ, u); // P(duration = u | j)
+        
+        // STEP 3: TRANSITION PROBABILITIES
+        // Consider all possible previous states i that could have transitioned to state j
+        // at time (T-u). We need: max_i [ α(i, T-u) * P(i → j) ]
+        double MaxTrans = -std::numeric_limits<double>::infinity();
+        
+        // TODO: At the moment, why loop this if GetTransProbability is only 1 when i+1==j
+        for (int i = CurrentState; i <= j; i++) {
+            if (i < 0) continue; // Skip invalid state indices
+            
+            MacroState &StateI = m_States[i];
+            int PrevIndex = (T - u) % m_BufferSize; // Buffer index for time T-u
+            
+            double distanceScaleFactor = 0.1;
+            if (i != j) {
+                // CASE A: Transition from different state i to state j
+                // Probability = α(i, T-u) * P(i → j)
+                double TransProb = GetTransProbability(i, j) * StateI.Forward[PrevIndex];
+                // Scale this probability by distance of i to CurrentState
+                int distance = i - CurrentState;
+                TransProb *= std::exp(-distance * distanceScaleFactor); // Example scaling factor
+                MaxTrans = std::max(MaxTrans, TransProb);
+            } else {
+                // CASE B: Self-transition (staying in same state j)
+                // This represents the case where we were already in state j at time T-u
+                // and continued to stay in it for duration u
+                
+                // NOTE: The commented code below would handle hierarchical states
+                // where a MacroState contains multiple AudioStates that could use
+                // different Markov models (some Semi-Markov, some regular Markov)
+                
+                // for (AudioState &SubState : StateJ.SubStates) {
+                //     if (SubState.Markov == MARKOV) {
+                //         int StateSize = StateJ.SubStates.size();
+                //         // SubState.Forward[bufferIndex] = Markov(SubState, CurrentState, j, T, bufferIndex);
+                //     }
+                // }
+                
+                // For now, we use the previous forward probability directly
+                double TransProb = StateJ.Forward[PrevIndex];
+                int distance = i - CurrentState;
+                TransProb *= std::exp(-distance * distanceScaleFactor); // Example scaling factor
+                MaxTrans = std::max(MaxTrans, TransProb);
+            }
+        }
+        
+        // STEP 4: COMBINE ALL COMPONENTS FOR THIS DURATION
+        // The contribution from duration u is:
+        // P(O_{t-u+1}...O_{t-1}|j) * P(duration = u|j) * max_i[α(i,t-u) * P(i→j)]
+        double MaxResult = ProbPrevObs * Sur * MaxTrans;
+        
+        // Keep track of the maximum over all possible durations
+        MaxAlpha = std::max(MaxAlpha, MaxResult);
+    }
+    
+    // FINAL RESULT: Multiply by current observation and return
+    // α(j,t) = P(Oₜ|j) * max_u [ ... ]
+    return Obs * MaxAlpha;
 }
 
 // ─────────────────────────────────────
@@ -626,7 +817,8 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
     double MaxValue = -std::numeric_limits<double>::infinity();
     int BestState = CurrentState;
     int bufferIndex = T % m_BufferSize;
-
+    std::vector<double> preNormalizedForward;
+    // Loop over current and Max (e.g. 5x)
     for (int j = CurrentState; j <= MaxState; j++) {
         if ((j < 0) || ((size_t)j >= m_States.size()))
             continue;
@@ -638,12 +830,13 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
         //     // SubState.Forward[bufferIndex] = Markov(SubState, CurrentState, j, T, bufferIndex);
         // }
         // }
-
+        // Update single value in Forward, in stateJ.
         if (StateJ.Markov == SEMIMARKOV) {
             StateJ.Forward[bufferIndex] = SemiMarkov(StateJ, CurrentState, j, T, bufferIndex);
         } else if (StateJ.Markov == MARKOV) {
             StateJ.Forward[bufferIndex] = Markov(StateJ, CurrentState, j, T, bufferIndex);
         }
+        preNormalizedForward.push_back(StateJ.Forward[bufferIndex]);
     }
 
     // Sum
@@ -656,14 +849,19 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
 
     // Normalization
     std::vector<double> Probs;
+    std::vector<double> AllProbs;
     for (int j = CurrentState; j <= MaxState; j++) {
         if ((j < 0) || ((size_t)j >= m_States.size()))
             continue;
 
         MacroState &StateJ = m_States[j];
+        // Why no normalisation when T == 0?
         if (T != 0) {
             double Forward = StateJ.Forward[bufferIndex];
             StateJ.Forward[bufferIndex] = Forward / SumForward;
+            AllProbs.push_back(StateJ.Forward[bufferIndex]);
+        } else {
+            AllProbs.push_back(StateJ.Forward[bufferIndex]/SumForward);
         }
         if (StateJ.Forward[bufferIndex] > MaxValue) {
             MaxValue = StateJ.Forward[bufferIndex];
@@ -671,18 +869,29 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
         }
         Probs.push_back(StateJ.Forward[bufferIndex]);
     }
+    // Make AllProbs a copy of Probs, but padded to be at least 10 long
 
     // TODO: Implement Cuvillier (2016)
-    double Entropy = CalculateEntropy(Probs);
-    double maxEntropy = log(Probs.size());
+    double Entropy = CalculateEntropy(AllProbs);
+    double maxEntropy = log(AllProbs.size());
     double Conf = 1.0 - (Entropy / maxEntropy);
     // printf("config: %d, %f, %f\n", BestState, entropy, confidence);
+    AllProbs.resize(15, 0.0);
+    preNormalizedForward.resize(15, 0.0);
+    // Also log to HDF5 system
+    logVector("StateJForwardNorm", AllProbs);
+    logVector("preNormalizedForward", preNormalizedForward);
+    logValue("Entropy", static_cast<float>(Entropy));
+    logValue("MaxEntropy", static_cast<float>(maxEntropy));
+    logValue("Confidence", static_cast<float>(Conf));
 
-    if (m_MinEntropy > 0) {
-        if (Conf > m_MinEntropy) {
-            return BestState;
-        } else {
-            return CurrentState;
+    if (BestState > 0) {
+        if (m_MinEntropy > 0) {
+            if (Conf > m_MinEntropy) {
+                return BestState;
+            } else {
+                return CurrentState;
+            }
         }
     }
     return BestState;
@@ -690,12 +899,19 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
 
 // ─────────────────────────────────────
 int MDP::GetEvent(Description &Desc) {
+    loopCounter += 1.0f;
+
     m_Desc = Desc;
     m_MaxScoreState = GetMaxJIndex(m_CurrentStateIndex);
+    logVector("NormSpectralPower", m_Desc.NormSpectralPower);
     GetAudioObservations(m_CurrentStateIndex - 1, m_MaxScoreState, m_Tau);
 
+    // If we are in silence, and not -1, return current score position.
+    // If last score position, return last score position.
     if (Desc.Silence || (size_t)m_CurrentStateIndex == m_States.size()) {
         if (m_CurrentStateIndex == -1) {
+            logValue("CurrentStateIndex", static_cast<float>(m_CurrentStateIndex)); // Also log to HDF5
+            logValue("ScorePos", 0.0f); // Also log to HDF5
             return 0;
         }
         return m_States[m_CurrentStateIndex].ScorePos;
@@ -714,23 +930,150 @@ int MDP::GetEvent(Description &Desc) {
 
     int StateIndex = Inference(m_CurrentStateIndex, m_MaxScoreState, m_Tau);
     if (StateIndex == -1) {
+        logValue("CurrentStateIndex", static_cast<float>(m_CurrentStateIndex)); // Also log to HDF5
+        logValue("ScorePos", 0.0f); // Also log to HDF5
         return 0;
     }
     m_PsiN = UpdatePsiN(StateIndex); // Time Update
 
+    if (m_CurrentStateIndex == 47 && m_CurrentStateIndex > 1) {
+        exportLogsToHDF5("MDP_Logs.h5");
+    }
     // Return Score Position
     if (m_CurrentStateIndex == StateIndex) {
         m_CurrentStateIndex = StateIndex;
+        logValue("CurrentStateIndex", static_cast<float>(m_CurrentStateIndex)); // Also log to HDF5
+        logValue("ScorePos", static_cast<float>(m_States[StateIndex].ScorePos)); // Also log to HDF5
         return m_States[StateIndex].ScorePos;
     } else {
         m_CurrentStateIndex = StateIndex;
 
         // Config
-        m_MinEntropy = m_States[StateIndex].Entropy;
-        m_SyncStrength = m_States[StateIndex].SyncStrength;
-        m_PhaseCoupling = m_States[StateIndex].PhaseCoupling;
+        // m_MinEntropy = m_States[StateIndex].Entropy;
+        // m_SyncStrength = m_States[StateIndex].SyncStrength;
+        // m_PhaseCoupling = m_States[StateIndex].PhaseCoupling;
 
+        logValue("CurrentStateIndex", static_cast<float>(m_CurrentStateIndex)); // Also log to HDF5
+        logValue("ScorePos", static_cast<float>(m_States[StateIndex].ScorePos)); // Also log to HDF5
         return m_States[StateIndex].ScorePos;
     }
 }
+
+// ============================================================================
+// HDF5 Logging Functions (Lightweight MATLAB replacement)
+// ============================================================================
+
+void MDP::logValue(const std::string &varName, float value) {
+    if (dataLogger) {
+        dataLogger->logValue(varName, value);
+    }
+}
+
+void MDP::logValue(const std::string &varName, double value) {
+    if (dataLogger) {
+        dataLogger->logValue(varName, value);
+    }
+}
+
+void MDP::logVector(const std::string &varName, const std::vector<float> &data) {
+    if (dataLogger) {
+        dataLogger->logVector(varName, data);
+    }
+}
+
+void MDP::logVector(const std::string &varName, const std::vector<double> &data) {
+    if (dataLogger) {
+        dataLogger->logVector(varName, data);
+    }
+}
+
+void MDP::exportLogsToHDF5(const std::string &filename) {
+    if (dataLogger) {
+        dataLogger->exportToHDF5(filename);
+    }
+}
+
+// ============================================================================
+// MATLAB Functions (Legacy support)
+// ============================================================================
+
+#if COMPILE_WITH_MATLAB
+void MDP::sendDebugVectorToMatlab(const std::string &varName, const std::vector<float> &data) {
+    if (mh && mh->isMatlabAvailable()) {
+        mh->sendVectorToMatlabWorkspace(varName, data);
+    }
+}
+
+void MDP::appendDebugVectorToMatlab(const std::string &varName, const std::vector<float> &data) {
+    if (mh && mh->isMatlabAvailable()) {
+        // mh->appendVectorToMatlabArray(varName, data);
+    }
+}
+
+void MDP::appendDebugVectorToMatlabDouble(const std::string &varName, const std::vector<double> &data) {
+    if (mh && mh->isMatlabAvailable()) {
+        // mh->appendVectorToMatlabArrayDouble(varName, data);
+    }
+}
+#endif // COMPILE_WITH_MATLAB
+
 } // namespace OScofo
+
+#if COMPILE_WITH_MATLAB
+// ============================================================================
+// MatlabHelper Implementation
+// ============================================================================
+
+void MatlabHelper::sendVectorToMatlabWorkspace(const std::string &varName, const std::vector<float> &data) {
+    auto vectorLength = data.size();
+    sendVectorToMatlabWorkspace(varName, data, {1, vectorLength});
+}
+
+void MatlabHelper::sendVectorToMatlabWorkspace(const std::string &varName, const std::vector<float> &data, const std::vector<size_t> &dims) {
+    try {
+        // Convert std::vector<float> to MATLAB array
+        matlab::data::ArrayFactory factory;
+        matlab::data::TypedArray<float> matlabArray = factory.createArray(dims, data.begin(), data.end());
+
+        // Send to MATLAB workspace
+        matlabEngine->setVariable(varName, matlabArray);
+    } catch (const std::exception &e) {
+        std::cout << "Error sending vector to MATLAB: " << e.what() << std::endl;
+    }
+}
+
+void MatlabHelper::appendVectorToMatlabArray(const std::string &varName, const std::vector<float> &data) {
+    try {
+        // Convert std::vector<float> to MATLAB array
+        matlab::data::ArrayFactory factory;
+        matlab::data::TypedArray<float> matlabArray = factory.createArray({1, data.size()}, data.begin(), data.end());
+
+        // Send the new data to a temporary variable
+        matlabEngine->setVariable("tempNewData", matlabArray);
+
+        // Call MATLAB function to append data to existing array
+        std::string matlabCommand = "appendToArray('" + varName + "', tempNewData);";
+        matlabEngine->eval(matlab::engine::convertUTF8StringToUTF16String(matlabCommand));
+    } catch (const std::exception &e) {
+        std::cout << "Error appending vector to MATLAB array: " << e.what() << std::endl;
+    }
+}
+
+void MatlabHelper::appendVectorToMatlabArrayDouble(const std::string &varName, const std::vector<double> &data) {
+    try {
+        // Convert std::vector<double> to MATLAB array
+        matlab::data::ArrayFactory factory;
+        matlab::data::TypedArray<double> matlabArray = factory.createArray({1, data.size()}, data.begin(), data.end());
+
+        // Send the new data to a temporary variable
+        matlabEngine->setVariable("tempNewData", matlabArray);
+
+        // Call MATLAB function to append data to existing array
+        std::string matlabCommand = "appendToArray('" + varName + "', tempNewData);";
+        matlabEngine->eval(matlab::engine::convertUTF8StringToUTF16String(matlabCommand));
+    } catch (const std::exception &e) {
+        std::cout << "Error appending vector to MATLAB array: " << e.what() << std::endl;
+    }
+}
+
+#endif // COMPILE_WITH_MATLAB
