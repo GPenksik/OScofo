@@ -4,7 +4,9 @@
 #include <OScofo/mir.hpp>
 #include <OScofo/score.hpp>
 #include <OScofo/states.hpp>
-
+// MEHRTA
+#include "OScofo/mdp.hpp"
+// MEHRTA
 #if defined(OSCOFO_LUA)
 extern "C" {
 #include <lua.h>
@@ -35,6 +37,24 @@ class OScofo {
     void SetCurrentEvent(int Event);
     void SetMinEntropy(double EntropyValue);
     void SetNewAudioParameters(float Sr, float FftSize, float HopSize);
+
+    // MEHRTA
+    size_t GetExpectedWindowSize() const {
+        return static_cast<int>(m_MIR.GetWindowingFunctionSize());
+    }
+    int GetWindowingFunctionSize() const {
+        return static_cast<int>(m_MIR.GetWindowingFunctionSize());
+    }
+    void ProcessAudioInput(const std::vector<float> &audio);
+    int GetCurrentScorePosition() const;
+    int GetFFTSize() const {
+        return static_cast<int>(m_FFTSize);
+    }
+    MDP &GetMDP() {
+        return m_MDP;
+    }
+
+    // MEHRTA
 
     // Get Functions
     double GetLiveBPM();
@@ -76,13 +96,17 @@ class OScofo {
     MIR m_MIR;
     Score m_Score;
 
+    // MEHRTA
+    int m_CurrentScorePosition = 0;
+    // MEHRTA
+
 #if defined(OSCOFO_LUA)
     lua_State *m_LuaState;
 #endif
 
     States m_States;
     Description m_Desc;
-    int m_CurrentScorePosition = -1;
+    // int m_CurrentScorePosition = -1;
 
     double m_Sr;
     double m_FFTSize;
