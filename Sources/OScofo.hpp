@@ -40,6 +40,7 @@ class OScofo {
     double GetLiveBPM();
     int GetEventIndex();
     double GetKappa();
+    double GetBlockDuration();
     double GetdBValue();
     ActionVec GetEventActions(int Index);
     std::string GetLuaCode();
@@ -70,6 +71,7 @@ class OScofo {
     std::vector<std::string> GetErrorMessage();
     void SetError(const std::string &message);
     void ClearError();
+    void PrintPerformanceTimingSummary() const;
 
   private:
     MDP m_MDP;

@@ -36,6 +36,8 @@ OScofo::OScofo(float Sr, float FftSize, float HopSize) : m_MDP(Sr, FftSize, HopS
 }
 
 //  ─────────────────────────────────────
+//?: Create a config struct, and pass this to OScofo, DP and MIR constructors. 
+//?: Ensure all members are using the same values. 
 void OScofo::SetNewAudioParameters(float Sr, float FftSize, float HopSize) {
     if (m_FFTSize == FftSize && m_HopSize == HopSize && m_Sr == Sr) {
         return;
@@ -44,12 +46,14 @@ void OScofo::SetNewAudioParameters(float Sr, float FftSize, float HopSize) {
     m_FFTSize = FftSize;
     m_HopSize = HopSize;
 
-    // Properly reconstruct MDP and MIR objects to avoid FFTW plan conflicts
-    // First, explicitly destroy the old objects to clean up FFTW plans
+    //? How to properly manage MDP and MIR when parameters are changed? 
+    //? Recommend switching to std::unique_ptr for both MDP and MIR, but I dont know if this will cause issues for integration with PD or Max, etc. 
+    //* Properly reconstruct MDP and MIR objects to avoid FFTW plan conflicts
+    //* First, explicitly destroy the old objects to clean up FFTW plans
     m_MDP.~MDP();
     m_MIR.~MIR();
     
-    // Then reconstruct them in-place with new parameters
+    //* Then reconstruct them in-place with new parameters
     new (&m_MDP) MDP(Sr, FftSize, HopSize);
     new (&m_MIR) MIR(Sr, FftSize, HopSize);
     
@@ -88,6 +92,11 @@ void OScofo::SetError(const std::string &message) {
 void OScofo::ClearError() {
     m_HasErrors = false;
     m_Errors.clear();
+}
+
+void OScofo::PrintPerformanceTimingSummary() const {
+    m_MIR.PrintPerformanceTimingSummary();
+    m_MDP.PrintPerformanceTimingSummary();
 }
 
 // ╭─────────────────────────────────────╮
@@ -239,6 +248,11 @@ double OScofo::GetKappa() {
 }
 
 // ─────────────────────────────────────
+double OScofo::GetBlockDuration() {
+    return m_MDP.GetBlockDuration();
+}
+
+// ─────────────────────────────────────
 double OScofo::GetPitchProb(double f) {
     return m_MDP.GetPitchSimilarity(f);
 }
@@ -312,13 +326,8 @@ bool OScofo::ParseScore(std::string ScorePath) {
 }
 
 // ─────────────────────────────────────
+//? Can we implement an alternative processBlock function that takes in an FFT spectrum directly? Bypass some MIR steps. 
 bool OScofo::ProcessBlock(std::vector<double> &AudioBuffer) {
-#if COMPILE_WITH_MATLAB
-    if (!m_MDP.mh->ensureMatlabConnection())
-    { 
-        return false;
-    }
-#endif
     if (!m_Score.ScoreIsLoaded()) {
         return false;
     }

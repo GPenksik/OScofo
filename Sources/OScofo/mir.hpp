@@ -1,8 +1,20 @@
 #pragma once
 
 #include <vector>
-
 #include <fftw3.h>
+
+// Performance timer - include header-only library
+#include <performance_timer.h>
+
+// Define COMPILE_OSCOFO_WITH_LOGGER to 1 to enable OScofo-specific logger features.
+#ifndef COMPILE_OSCOFO_WITH_LOGGER
+#define COMPILE_OSCOFO_WITH_LOGGER 0
+#endif
+
+#if COMPILE_OSCOFO_WITH_LOGGER
+// HDF5 logging system - include header-only library
+#include <hdf5_logger/hdf5_logger.hpp>
+#endif
 
 #include "log.hpp"
 #include "states.hpp"
@@ -12,6 +24,8 @@ namespace OScofo {
 #define TWO_PI (2 * M_PI)
 #endif
 
+// Macro for easy scoped timing in MIR
+#define MIR_PERF_TIMER_SCOPE(timer, name) PERF_TIMER_SCOPE(timer, name)
 // ╭─────────────────────────────────────╮
 // │     Music Information Retrieval     │
 // ╰─────────────────────────────────────╯
@@ -30,6 +44,16 @@ class MIR {
     std::vector<std::string> GetErrorMessage();
     void SetError(const std::string &message);
     void ClearError();
+
+    // Performance timing
+    PerformanceTimer m_PerformanceTimer;
+    void PrintPerformanceTimingSummary() const;
+    // HDF5 logging functions (lightweight replacement for MATLAB debugging)
+    void logValue(const std::string &varName, float value);
+    void logValue(const std::string &varName, double value);
+    void logVector(const std::string &varName, const std::vector<float> &data);
+    void logVector(const std::string &varName, const std::vector<double> &data);
+    void exportLogsToHDF5(const std::string &filename = "mir_debug_data.h5");
 
   private:
     // Helpers
@@ -59,6 +83,11 @@ class MIR {
 
     // Time
     double m_EventTimeElapsed = 0.0; // ms
+
+#if COMPILE_OSCOFO_WITH_LOGGER
+    // HDF5 logging system
+    std::unique_ptr<DataLogger> dataLogger;
+#endif
 
     // Errors
     bool m_HasErrors = false;

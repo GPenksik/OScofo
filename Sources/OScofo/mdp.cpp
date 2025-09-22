@@ -11,11 +11,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#if COMPILE_WITH_MATLAB
-// #include "MatlabEngine.hpp"
-// using namespace matlab::engine;
-#endif
-
 namespace OScofo {
 
 /*
@@ -55,11 +50,17 @@ MDP::MDP(double Sr, double FFTSize, double HopSize) {
     m_TimeInPrevEvent = 0;
 
     SetTunning(440);
+    SetEnableTemporalCoherence(true);
+    if (m_EnableTemporalCoherence)
+    {
+        SetTemporalCoherenceSigmaFactor(0.2);
+    } else {
+        SetTemporalCoherenceSigmaFactor(0.0);
+    }
 
+#if COMPILE_OSCOFO_WITH_LOGGER
     // Initialize HDF5 logger
     dataLogger = std::make_unique<DataLogger>();
-#if COMPILE_WITH_MATLAB
-    mh = std::make_unique<MatlabHelper>();
 #endif
 }
 
@@ -133,34 +134,47 @@ void MDP::SetScoreStates(States ScoreStates) {
 
 // ─────────────────────────────────────
 void MDP::BuildPitchTemplate(double Freq) {
+    // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "BuildTemplate_Total");
+    
     // Following Gong (2015), eq 5 and 6
     const double sigmaSemitons = m_PitchTemplateSigma;
     const double sigmaLog = sigmaSemitons / 12.0;
     const double beta = 0.5;
 
-    double rootBinFreq = round(Freq / (m_Sr / m_FFTSize));
-    if (m_PitchTemplates.find(rootBinFreq) != m_PitchTemplates.end()) {
-        return;
+    double rootBinFreq;
+    {
+        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "BuildTemplate_Setup");
+        rootBinFreq = round(Freq / (m_Sr / m_FFTSize));
+        if (m_PitchTemplates.find(rootBinFreq) != m_PitchTemplates.end()) {
+            return;
+        }
+        m_PitchTemplates[rootBinFreq].resize(m_FFTSize / 2, 0.0);
     }
 
-    m_PitchTemplates[rootBinFreq].resize(m_FFTSize / 2, 0.0);
-    for (int k = 1; k <= m_Harmonics; ++k) {
-        double harmonicFreqHz = Freq * k;
-        double sigmaHz = harmonicFreqHz * (std::pow(2.0, sigmaLog) - 1.0);
-        double envelope = std::exp(-beta * (k - 1));
-        for (size_t i = 0; i < m_FFTSize / 2; ++i) {
-            double binFreq = i * (m_Sr / static_cast<double>(m_FFTSize));
-            double exponent = -0.5 * std::pow((binFreq - harmonicFreqHz) / sigmaHz, 2);
-            double gaussian = (1.0 / (sigmaHz * std::sqrt(2 * M_PI))) * std::exp(exponent);
-            m_PitchTemplates[rootBinFreq][i] += envelope * gaussian;
+    // Generate harmonic components
+    {
+        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "BuildTemplate_Harmonics");
+        for (int k = 1; k <= m_Harmonics; ++k) {
+            double harmonicFreqHz = Freq * k;
+            double sigmaHz = harmonicFreqHz * (std::pow(2.0, sigmaLog) - 1.0);
+            double envelope = std::exp(-beta * (k - 1));
+            for (size_t i = 0; i < m_FFTSize / 2; ++i) {
+                double binFreq = i * (m_Sr / static_cast<double>(m_FFTSize));
+                double exponent = -0.5 * std::pow((binFreq - harmonicFreqHz) / sigmaHz, 2);
+                double gaussian = (1.0 / (sigmaHz * std::sqrt(2 * M_PI))) * std::exp(exponent);
+                m_PitchTemplates[rootBinFreq][i] += envelope * gaussian;
+            }
         }
     }
 
-    // Normalize template to sum to 1 (probability distribution)
-    double sum = std::accumulate(m_PitchTemplates[rootBinFreq].begin(), m_PitchTemplates[rootBinFreq].end(), 0.0);
-    if (sum > 0) {
-        for (auto &val : m_PitchTemplates[rootBinFreq]) {
-            val = (val + 1e-12) / (sum + 1e-12); // Avoid zero probabilities
+    // Normalize template
+    {
+        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "BuildTemplate_Normalize");
+        double sum = std::accumulate(m_PitchTemplates[rootBinFreq].begin(), m_PitchTemplates[rootBinFreq].end(), 0.0);
+        if (sum > 0) {
+            for (auto &val : m_PitchTemplates[rootBinFreq]) {
+                val = (val + 1e-12) / (sum + 1e-12); // Avoid zero probabilities
+            }
         }
     }
 }
@@ -208,6 +222,11 @@ double MDP::GetLiveBPM() {
 // ─────────────────────────────────────
 double MDP::GetKappa() {
     return m_Kappa;
+}
+
+// ─────────────────────────────────────
+double MDP::GetBlockDuration() {
+    return m_BlockDur;
 }
 
 // ─────────────────────────────────────
@@ -262,6 +281,26 @@ MacroState MDP::GetState(int Index) {
 // ─────────────────────────────────────
 void MDP::SetPitchTemplateSigma(double f) {
     m_PitchTemplateSigma = f;
+}
+
+// ─────────────────────────────────────
+void MDP::SetEnableTemporalCoherence(bool enable) {
+    m_EnableTemporalCoherence = enable;
+}
+
+// ─────────────────────────────────────
+void MDP::SetTemporalCoherenceSigmaFactor(double factor) {
+    m_TemporalCoherenceSigmaFactor = factor;
+}
+
+// ─────────────────────────────────────
+bool MDP::GetEnableTemporalCoherence() const {
+    return m_EnableTemporalCoherence;
+}
+
+// ─────────────────────────────────────
+double MDP::GetTemporalCoherenceSigmaFactor() const {
+    return m_TemporalCoherenceSigmaFactor;
 }
 
 // ╭─────────────────────────────────────╮
@@ -343,6 +382,8 @@ int MDP::GetMaxJIndex(int StateIndex) {
 
     return MaxJ;
 }
+
+
 
 // ─────────────────────────────────────
 /**
@@ -514,75 +555,116 @@ double MDP::UpdatePsiN(int StateIndex) {
 // │     Markov Description Process      │
 // ╰─────────────────────────────────────╯
 void MDP::GetAudioObservations(int FirstStateIndex, int LastStateIndex, int T) {
+    // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_Total");
+    
     std::unordered_map<double, double> PitchObs;
-
-    // Create log vector
-    std::vector<double> obsKLLogVector;
-    obsKLLogVector.push_back((double)loopCounter);
-    obsKLLogVector.push_back((double)FirstStateIndex+1);
-    obsKLLogVector.push_back((double)LastStateIndex+1);
-    obsKLLogVector.push_back((double)T);
+    int noteStatesProcessed = 0;
+    int trillStatesProcessed = 0;
+    int restStatesProcessed = 0;
+    int cacheHits = 0;
+    int pitchSimilarityComputations = 0;
 
     for (int j = FirstStateIndex; j <= LastStateIndex; j++) {
         if (j < 0) {
-            obsKLLogVector.push_back(0.0);
             continue;
         }
 
         MacroState &StateJ = m_States[j];
         int BufferIndex = (T % m_BufferSize);
+        
         if (StateJ.Type == NOTE) {
-            // TODO: Need to rethink this
+            // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_NOTE_Processing");
+            noteStatesProcessed++;
+            
             double KL = 0;
             for (AudioState AudioState : StateJ.SubStates) {
-                if (PitchObs.find(AudioState.Freq) != PitchObs.end()) {
-                    AudioState.Obs[BufferIndex] = PitchObs[AudioState.Freq];
-                    KL = PitchObs[AudioState.Freq];
-                    continue;
+                {
+                    // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_Cache_Lookup");
+                    if (PitchObs.find(AudioState.Freq) != PitchObs.end()) {
+                        AudioState.Obs[BufferIndex] = PitchObs[AudioState.Freq];
+                        KL = PitchObs[AudioState.Freq];
+                        cacheHits++;
+                        continue;
+                    }
                 }
+                
                 if (AudioState.Type == NOTE) {
-                    KL = GetPitchSimilarity(AudioState.Freq);
-                    PitchObs[AudioState.Freq] = KL;
-                    AudioState.Obs[BufferIndex] = KL;
+                    {
+                        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_PitchSimilarity");
+                        KL = GetPitchSimilarity(AudioState.Freq);
+                        pitchSimilarityComputations++;
+                    }
+                    
+                    {
+                        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_Cache_Store");
+                        PitchObs[AudioState.Freq] = KL;
+                        AudioState.Obs[BufferIndex] = KL;
+                    }
                 }
             }
             StateJ.Obs[BufferIndex] = KL;
-            obsKLLogVector.push_back(KL);
+            
         } else if (StateJ.Type == REST) {
+            restStatesProcessed++;
             // StateJ.Obs[BufferIndex] = Desc.Amp;
 
         } else if (StateJ.Type == TRILL) {
+            trillStatesProcessed++;
+            
             double bestProb = 0;
             for (AudioState AudioState : StateJ.SubStates) {
-                if (PitchObs.find(AudioState.Freq) != PitchObs.end()) {
-                    AudioState.Obs[BufferIndex] = PitchObs[AudioState.Freq];
-                    continue;
+                {
+                    // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_Cache_Lookup");
+                    if (PitchObs.find(AudioState.Freq) != PitchObs.end()) {
+                        AudioState.Obs[BufferIndex] = PitchObs[AudioState.Freq];
+                        cacheHits++;
+                        continue;
+                    }
                 }
-                double KL = GetPitchSimilarity(AudioState.Freq);
-                if (KL > bestProb) {
-                    bestProb = KL;
+                
+                {
+                    // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetAudioObs_PitchSimilarity");
+                    double KL = GetPitchSimilarity(AudioState.Freq);
+                    pitchSimilarityComputations++;
+                    
+                    if (KL > bestProb) {
+                        bestProb = KL;
+                    }
+                    AudioState.Obs[BufferIndex] = KL;
                 }
-                AudioState.Obs[BufferIndex] = KL;
             }
             StateJ.Obs[BufferIndex] = bestProb;
         }
     }
-    obsKLLogVector.resize(15);
-    logVector("ObsKL", obsKLLogVector);
+    
+    // Log performance statistics for analysis
+    logValue("NoteStatesProcessed", static_cast<float>(noteStatesProcessed));
+    logValue("TrillStatesProcessed", static_cast<float>(trillStatesProcessed));
+    logValue("RestStatesProcessed", static_cast<float>(restStatesProcessed));
+    logValue("CacheHits", static_cast<float>(cacheHits));
+    logValue("PitchSimilarityComputations", static_cast<float>(pitchSimilarityComputations));
 }
 
 // ─────────────────────────────────────
 double MDP::GetPitchSimilarity(double Freq) {
+    // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "PitchSim_Total");
+    
     double KLDiv = 0.0;
-    double RootBinFreq = round(Freq / (m_Sr / m_FFTSize));
-    PitchTemplateArray PitchTemplate;
-
-    if (m_PitchTemplates.find(RootBinFreq) != m_PitchTemplates.end()) {
-        PitchTemplate = m_PitchTemplates[RootBinFreq];
-    } else {
-        BuildPitchTemplate(Freq);
-        PitchTemplate = m_PitchTemplates[RootBinFreq];
+    double RootBinFreq;
+    
+    // Step 1: Frequency quantization
+    {
+        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "PitchSim_FreqQuantization");
+        RootBinFreq = round(Freq / (m_Sr / m_FFTSize));
     }
+    
+    // Step 2: Template lookup or generation  
+    auto it = m_PitchTemplates.find(RootBinFreq);
+    if (it == m_PitchTemplates.end()) {
+        BuildPitchTemplate(Freq);
+        it = m_PitchTemplates.find(RootBinFreq);
+    }
+    const PitchTemplateArray& PitchTemplate = it->second;
 
     for (size_t i = 0; i < m_FFTSize / 2; i++) {
         double P = PitchTemplate[i];
@@ -593,12 +675,15 @@ double MDP::GetPitchSimilarity(double Freq) {
             KLDiv += Q;
         }
     }
-
-    // KLDiv /= (m_Desc.StdDev + 1e-9);
-    double noise_robustness = 1.0 / (1.0 + m_Desc.StdDev);
-    KLDiv *= noise_robustness;
-
-    KLDiv = exp(-m_PitchScalingFactor * KLDiv);
+    
+    // Step 4: Noise robustness and final transformation
+    {
+        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "PitchSim_PostProcessing");
+        double noise_robustness = 1.0 / (1.0 + m_Desc.StdDev);
+        KLDiv *= noise_robustness;
+        KLDiv = exp(-m_PitchScalingFactor * KLDiv);
+    }
+    
     return KLDiv;
 }
 
@@ -729,7 +814,6 @@ double MDP::SemiMarkov(MacroState &StateJ, int CurrentState, int j, int T, int b
         // at time (T-u). We need: max_i [ α(i, T-u) * P(i → j) ]
         double MaxTrans = -std::numeric_limits<double>::infinity();
         
-        // TODO: At the moment, why loop this if GetTransProbability is only 1 when i+1==j
         for (int i = CurrentState; i <= j; i++) {
             if (i < 0) continue; // Skip invalid state indices
             
@@ -741,9 +825,10 @@ double MDP::SemiMarkov(MacroState &StateJ, int CurrentState, int j, int T, int b
                 // CASE A: Transition from different state i to state j
                 // Probability = α(i, T-u) * P(i → j)
                 double TransProb = GetTransProbability(i, j) * StateI.Forward[PrevIndex];
-                // Scale this probability by distance of i to CurrentState
-                int distance = i - CurrentState;
-                TransProb *= std::exp(-distance * distanceScaleFactor); // Example scaling factor
+                // Scale this probability by distance of i to CurrentState.
+                // Turn this adjustment off while we are testing the temporal coherence model. 
+                // int distance = i - CurrentState;
+                // TransProb *= std::exp(-distance * distanceScaleFactor); // Example scaling factor
                 MaxTrans = std::max(MaxTrans, TransProb);
             } else {
                 // CASE B: Self-transition (staying in same state j)
@@ -814,23 +899,15 @@ double CalculateEntropy(const std::vector<double> &probs) {
 
 // ─────────────────────────────────────
 int MDP::Inference(int CurrentState, int MaxState, int T) {
+    std::vector<double> preNormalizedForward;
     double MaxValue = -std::numeric_limits<double>::infinity();
     int BestState = CurrentState;
     int bufferIndex = T % m_BufferSize;
-    std::vector<double> preNormalizedForward;
     // Loop over current and Max (e.g. 5x)
     for (int j = CurrentState; j <= MaxState; j++) {
         if ((j < 0) || ((size_t)j >= m_States.size()))
             continue;
         MacroState &StateJ = m_States[j];
-        // for (AudioState &SubState : StateJ.SubStates) {
-        // if (SubState.Markov == MARKOV) {
-        //     int StateSize = StateJ.SubStates.size();
-        //
-        //     // SubState.Forward[bufferIndex] = Markov(SubState, CurrentState, j, T, bufferIndex);
-        // }
-        // }
-        // Update single value in Forward, in stateJ.
         if (StateJ.Markov == SEMIMARKOV) {
             StateJ.Forward[bufferIndex] = SemiMarkov(StateJ, CurrentState, j, T, bufferIndex);
         } else if (StateJ.Markov == MARKOV) {
@@ -838,7 +915,6 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
         }
         preNormalizedForward.push_back(StateJ.Forward[bufferIndex]);
     }
-
     // Sum
     double SumForward = 0;
     for (int j = CurrentState; j <= MaxState; j++) {
@@ -852,10 +928,10 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
     std::vector<double> AllProbs;
     for (int j = CurrentState; j <= MaxState; j++) {
         if ((j < 0) || ((size_t)j >= m_States.size()))
-            continue;
-
+        continue;
+        
         MacroState &StateJ = m_States[j];
-        // Why no normalisation when T == 0?
+        //? Why no normalisation when T == 0?
         if (T != 0) {
             double Forward = StateJ.Forward[bufferIndex];
             StateJ.Forward[bufferIndex] = Forward / SumForward;
@@ -869,9 +945,65 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
         }
         Probs.push_back(StateJ.Forward[bufferIndex]);
     }
-    // Make AllProbs a copy of Probs, but padded to be at least 10 long
 
+    // Store original probabilities for logging
+    std::vector<double> OriginalProbs = AllProbs;
+    
+    // CUVILLIER (2016) TEMPORAL COHERENCE IMPLEMENTATION
+    if (m_EnableTemporalCoherence && m_TemporalCoherenceSigmaFactor > 0) {
+        // Calculate current time in seconds
+        double CurrentTime = loopCounter * m_BlockDur;
+        
+        // Apply temporal coherence weighting to each state probability
+        for (int j = CurrentState; j <= MaxState; j++) {
+            if ((j < 0) || ((size_t)j >= m_States.size()))
+                continue;
+                
+            int AllProbsIndex = j - CurrentState;
+            if (AllProbsIndex < 0 || AllProbsIndex >= (int)AllProbs.size()) {
+                continue;
+            }
+            
+            MacroState &StateJ = m_States[j];
+            double ExpectedOnset = StateJ.OnsetExpected;
+            
+            // Calculate temporal coherence weight using Gaussian distribution
+            double sigma = m_TemporalCoherenceSigmaFactor * m_PsiN1;
+            double timeDiff = CurrentTime - ExpectedOnset;
+            double temporalWeight = exp(-0.5 * (timeDiff * timeDiff) / (sigma * sigma));
+            
+            // Apply temporal weighting to probability
+            AllProbs[AllProbsIndex] *= temporalWeight;
+        }
+        
+        // Renormalize probabilities after temporal coherence weighting
+        double SumAllProbs = std::accumulate(AllProbs.begin(), AllProbs.end(), 0.0);
+        if (SumAllProbs > 0) {
+            for (double &p : AllProbs) {
+                p /= SumAllProbs;
+            }
+        }
+        
+        // Recalculate best state with temporal coherence
+        MaxValue = -std::numeric_limits<double>::infinity();
+        BestState = CurrentState;
+        for (int j = CurrentState; j <= MaxState; j++) {
+            if ((j < 0) || ((size_t)j >= m_States.size()))
+                continue;
+                
+            int AllProbsIndex = j - CurrentState;
+            if (AllProbsIndex >= 0 && AllProbsIndex < (int)AllProbs.size()) {
+                if (AllProbs[AllProbsIndex] > MaxValue) {
+                    MaxValue = AllProbs[AllProbsIndex];
+                    BestState = j;
+                }
+            }
+        }
+    }
+
+    //? Changed the calculation of Entropy to use normalised probabilities, even if the saved probabilities are not normalised when T==0. 
     // TODO: Implement Cuvillier (2016)
+    // ORIGINAL CALCULATION
     double Entropy = CalculateEntropy(AllProbs);
     double maxEntropy = log(AllProbs.size());
     double Conf = 1.0 - (Entropy / maxEntropy);
@@ -884,6 +1016,11 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
     logValue("Entropy", static_cast<float>(Entropy));
     logValue("MaxEntropy", static_cast<float>(maxEntropy));
     logValue("Confidence", static_cast<float>(Conf));
+
+    // Also log temporal coherence data for analysis
+    logValue("EnableTemporalCoherence", m_EnableTemporalCoherence ? 1.0f : 0.0f);
+    logValue("TemporalCoherenceSigmaFactor", static_cast<float>(m_TemporalCoherenceSigmaFactor));
+    logVector("OriginalProbs", OriginalProbs);
 
     if (BestState > 0) {
         if (m_MinEntropy > 0) {
@@ -899,12 +1036,19 @@ int MDP::Inference(int CurrentState, int MaxState, int T) {
 
 // ─────────────────────────────────────
 int MDP::GetEvent(Description &Desc) {
+    PERF_TIMER_SCOPE(m_PerformanceTimer, "GetEventTotal");
     loopCounter += 1.0f;
 
     m_Desc = Desc;
     m_MaxScoreState = GetMaxJIndex(m_CurrentStateIndex);
     logVector("NormSpectralPower", m_Desc.NormSpectralPower);
-    GetAudioObservations(m_CurrentStateIndex - 1, m_MaxScoreState, m_Tau);
+
+    // START PERF TIMER SCOPE: Get_Audio_Observations
+    {
+        MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "Get_Audio_Observations");
+        GetAudioObservations(m_CurrentStateIndex - 1, m_MaxScoreState, m_Tau);
+    }
+    // END PERF TIMER SCOPE: Get_Audio_Observations
 
     // If we are in silence, and not -1, return current score position.
     // If last score position, return last score position.
@@ -917,7 +1061,9 @@ int MDP::GetEvent(Description &Desc) {
         return m_States[m_CurrentStateIndex].ScorePos;
     }
 
+    // START PERF TIMER SCOPE: Get_Initial_Distribution
     if (m_Tau == 0) {
+        // MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "Get_Initial_Distribution");
         std::vector<double> InitialProb = GetInitialDistribution();
         for (int j = m_CurrentStateIndex; j < m_MaxScoreState; j++) {
             if (j < 0) {
@@ -927,17 +1073,38 @@ int MDP::GetEvent(Description &Desc) {
             StateJ.InitProb = InitialProb[j - m_CurrentStateIndex];
         }
     }
-
-    int StateIndex = Inference(m_CurrentStateIndex, m_MaxScoreState, m_Tau);
+    // END PERF TIMER SCOPE: Get_Initial_Distribution
+    
+    // START PERF TIMER SCOPE: Get_Forward_Probabilities
+    int StateIndex;
+    {
+        MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "Get_Forward_Probabilities");
+        StateIndex = Inference(m_CurrentStateIndex, m_MaxScoreState, m_Tau);
+    }
     if (StateIndex == -1) {
         logValue("CurrentStateIndex", static_cast<float>(m_CurrentStateIndex)); // Also log to HDF5
         logValue("ScorePos", 0.0f); // Also log to HDF5
         return 0;
     }
-    m_PsiN = UpdatePsiN(StateIndex); // Time Update
+    // END PERF TIMER SCOPE: Get_Forward_Probabilities
 
-    if (m_CurrentStateIndex == 47 && m_CurrentStateIndex > 1) {
-        exportLogsToHDF5("MDP_Logs.h5");
+    // START PERF TIMER SCOPE: Update_PsiN
+    {
+        MDP_PERF_TIMER_SCOPE(m_PerformanceTimer, "Update_PsiN");
+        m_PsiN = UpdatePsiN(StateIndex); // Time Update
+    }
+    logValue("PsiN", static_cast<float>(m_PsiN));           // Also log to HDF5
+    // END PERF TIMER SCOPE: Update_PsiN
+
+    if (m_CurrentStateIndex >= m_States.size() - 3 && m_CurrentStateIndex > 1) {
+        // Only export logs once, at end of piece
+        if (!m_LogsHaveBeenExported) {
+            // PrintPerformanceTimingSummary();
+            // Change filename to include the sigmaFactor and m_HopSize for easier identification
+            std::string filename = "MDP_Logs_" + std::to_string(m_TemporalCoherenceSigmaFactor) + "_" + std::to_string(m_HopSize) + ".h5";
+            exportLogsToHDF5(filename);
+            m_LogsHaveBeenExported = true;
+        }
     }
     // Return Score Position
     if (m_CurrentStateIndex == StateIndex) {
@@ -964,116 +1131,62 @@ int MDP::GetEvent(Description &Desc) {
 // ============================================================================
 
 void MDP::logValue(const std::string &varName, float value) {
+    #if COMPILE_OSCOFO_WITH_LOGGER
     if (dataLogger) {
         dataLogger->logValue(varName, value);
     }
+    #endif
 }
 
 void MDP::logValue(const std::string &varName, double value) {
+    #if COMPILE_OSCOFO_WITH_LOGGER
     if (dataLogger) {
         dataLogger->logValue(varName, value);
     }
+    #endif
 }
 
 void MDP::logVector(const std::string &varName, const std::vector<float> &data) {
+    #if COMPILE_OSCOFO_WITH_LOGGER
     if (dataLogger) {
         dataLogger->logVector(varName, data);
     }
+    #endif
 }
 
 void MDP::logVector(const std::string &varName, const std::vector<double> &data) {
+    #if COMPILE_OSCOFO_WITH_LOGGER
     if (dataLogger) {
         dataLogger->logVector(varName, data);
     }
+    #endif
 }
 
 void MDP::exportLogsToHDF5(const std::string &filename) {
+    #if COMPILE_OSCOFO_WITH_LOGGER
     if (dataLogger) {
         dataLogger->exportToHDF5(filename);
     }
+    #endif
 }
 
 // ============================================================================
-// MATLAB Functions (Legacy support)
+// Performance Timer Methods
 // ============================================================================
 
-#if COMPILE_WITH_MATLAB
-void MDP::sendDebugVectorToMatlab(const std::string &varName, const std::vector<float> &data) {
-    if (mh && mh->isMatlabAvailable()) {
-        mh->sendVectorToMatlabWorkspace(varName, data);
-    }
+void MDP::PrintPerformanceTimingSummary() const {
+    m_PerformanceTimer.printSummary("MDP");
+    m_PerformanceTimer.printHierarchicalSummary("GetEventTotal");
+    m_PerformanceTimer.printHierarchicalTree("GetEventTotal");
+    m_PerformanceTimer.printHierarchicalTree("GetEventTotal");
 }
 
-void MDP::appendDebugVectorToMatlab(const std::string &varName, const std::vector<float> &data) {
-    if (mh && mh->isMatlabAvailable()) {
-        // mh->appendVectorToMatlabArray(varName, data);
-    }
+void MDP::ResetPerformanceTimers() {
+    m_PerformanceTimer.reset();
 }
 
-void MDP::appendDebugVectorToMatlabDouble(const std::string &varName, const std::vector<double> &data) {
-    if (mh && mh->isMatlabAvailable()) {
-        // mh->appendVectorToMatlabArrayDouble(varName, data);
-    }
+std::vector<PerformanceTimer::TimingResult> MDP::GetPerformanceResults() const {
+    return m_PerformanceTimer.getResults();
 }
-#endif // COMPILE_WITH_MATLAB
 
 } // namespace OScofo
-
-#if COMPILE_WITH_MATLAB
-// ============================================================================
-// MatlabHelper Implementation
-// ============================================================================
-
-void MatlabHelper::sendVectorToMatlabWorkspace(const std::string &varName, const std::vector<float> &data) {
-    auto vectorLength = data.size();
-    sendVectorToMatlabWorkspace(varName, data, {1, vectorLength});
-}
-
-void MatlabHelper::sendVectorToMatlabWorkspace(const std::string &varName, const std::vector<float> &data, const std::vector<size_t> &dims) {
-    try {
-        // Convert std::vector<float> to MATLAB array
-        matlab::data::ArrayFactory factory;
-        matlab::data::TypedArray<float> matlabArray = factory.createArray(dims, data.begin(), data.end());
-
-        // Send to MATLAB workspace
-        matlabEngine->setVariable(varName, matlabArray);
-    } catch (const std::exception &e) {
-        std::cout << "Error sending vector to MATLAB: " << e.what() << std::endl;
-    }
-}
-
-void MatlabHelper::appendVectorToMatlabArray(const std::string &varName, const std::vector<float> &data) {
-    try {
-        // Convert std::vector<float> to MATLAB array
-        matlab::data::ArrayFactory factory;
-        matlab::data::TypedArray<float> matlabArray = factory.createArray({1, data.size()}, data.begin(), data.end());
-
-        // Send the new data to a temporary variable
-        matlabEngine->setVariable("tempNewData", matlabArray);
-
-        // Call MATLAB function to append data to existing array
-        std::string matlabCommand = "appendToArray('" + varName + "', tempNewData);";
-        matlabEngine->eval(matlab::engine::convertUTF8StringToUTF16String(matlabCommand));
-    } catch (const std::exception &e) {
-        std::cout << "Error appending vector to MATLAB array: " << e.what() << std::endl;
-    }
-}
-
-void MatlabHelper::appendVectorToMatlabArrayDouble(const std::string &varName, const std::vector<double> &data) {
-    try {
-        // Convert std::vector<double> to MATLAB array
-        matlab::data::ArrayFactory factory;
-        matlab::data::TypedArray<double> matlabArray = factory.createArray({1, data.size()}, data.begin(), data.end());
-
-        // Send the new data to a temporary variable
-        matlabEngine->setVariable("tempNewData", matlabArray);
-
-        // Call MATLAB function to append data to existing array
-        std::string matlabCommand = "appendToArray('" + varName + "', tempNewData);";
-        matlabEngine->eval(matlab::engine::convertUTF8StringToUTF16String(matlabCommand));
-    } catch (const std::exception &e) {
-        std::cout << "Error appending vector to MATLAB array: " << e.what() << std::endl;
-    }
-}
-
-#endif // COMPILE_WITH_MATLAB

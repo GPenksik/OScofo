@@ -5,18 +5,18 @@
 
 #include "states.hpp"
 
-#ifndef COMPILE_WITH_MATLAB
-#define COMPILE_WITH_MATLAB 0
+// Performance timer - include header-only library
+#include <performance_timer.h>
+
+// Define COMPILE_OSCOFO_WITH_LOGGER to 1 to enable OScofo-specific logger features.
+#ifndef COMPILE_OSCOFO_WITH_LOGGER
+#define COMPILE_OSCOFO_WITH_LOGGER 1
 #endif
 
-#if COMPILE_WITH_MATLAB
-#include "MatlabEngine.hpp"
-using namespace matlab::engine;
-class MatlabHelper;
+#if COMPILE_OSCOFO_WITH_LOGGER
+// HDF5 logging system - include header-only library
+#include <hdf5_logger/hdf5_logger.hpp>
 #endif
-
-// HDF5 logging system - include from main plugin sources
-#include "../../../../Sources/hdf5_logger.hpp"
 
 namespace OScofo {
 
@@ -30,6 +30,9 @@ namespace OScofo {
 
 using PitchTemplateArray = std::vector<double>;
 
+// Macro for easy scoped timing in MDP
+#define MDP_PERF_TIMER_SCOPE(timer, name) PERF_TIMER_SCOPE(timer, name)
+
 // ╭─────────────────────────────────────╮
 // │     Markov Description Process      │
 // ╰─────────────────────────────────────╯
@@ -37,12 +40,10 @@ class MDP {
   public:
     MDP(double Sr, double WindowSize, double HopSize);
 
-#if COMPILE_WITH_MATLAB
-  std::unique_ptr<MatlabHelper> mh;
-#endif
-    
+#if COMPILE_OSCOFO_WITH_LOGGER
     // HDF5 logging system
     std::unique_ptr<DataLogger> dataLogger;
+#endif
     
     float loopCounter = 0.0f;
 
@@ -60,6 +61,12 @@ class MDP {
     double GetLiveBPM();
     void ResetLiveBpm();
     void SetdBTreshold(double dB);
+    
+    // Temporal Coherence Functions
+    void SetEnableTemporalCoherence(bool enable);
+    void SetTemporalCoherenceSigmaFactor(double factor);
+    bool GetEnableTemporalCoherence() const;
+    double GetTemporalCoherenceSigmaFactor() const;
 
     // Get Functions
     int GetTunning();
@@ -68,6 +75,8 @@ class MDP {
     std::vector<MacroState> GetStates();
     MacroState GetState(int Index);
     double GetKappa();
+    double GetBlockDuration();
+
     void AddState(MacroState state);
     void ClearStates();
 
@@ -88,9 +97,18 @@ class MDP {
     void SetError(const std::string &message);
     void ClearError();
 
+    // Performance timing
+    void PrintPerformanceTimingSummary() const;
+    void ResetPerformanceTimers();
+    std::vector<PerformanceTimer::TimingResult> GetPerformanceResults() const;
+
   private:
     // Config
     double m_MinEntropy = 0;
+    
+    // Temporal Coherence (Cuvillier 2016)
+    bool m_EnableTemporalCoherence = false;
+    double m_TemporalCoherenceSigmaFactor = 0.1; // Sigma as fraction of m_PsiN
 
     // Audio
     double m_Sr;
@@ -125,6 +143,8 @@ class MDP {
     double m_BeatsAhead = 1;
     double m_NormAlpha = 1;
     double m_SecondsAhead = 2;
+
+    bool m_LogsHaveBeenExported = false;
 
     // Time
     double UpdatePsiN(int StateIndex);
@@ -162,6 +182,9 @@ class MDP {
     bool m_HasErrors = false;
     std::vector<std::string> m_Errors;
 
+    // Performance timing
+    PerformanceTimer m_PerformanceTimer;
+
     // HDF5 logging functions (lightweight replacement for MATLAB debugging)
     void logValue(const std::string &varName, float value);
     void logValue(const std::string &varName, double value);
@@ -169,125 +192,6 @@ class MDP {
     void logVector(const std::string &varName, const std::vector<double> &data);
     void exportLogsToHDF5(const std::string &filename = "oscofo_debug_data.h5");
 
-  #if COMPILE_WITH_MATLAB
-    /**
-     * \brief Send vector to MATLAB workspace for debugging (validation builds only)
-     * \param varName Variable name in MATLAB workspace
-     * \param data Vector data to send
-     */
-    void sendDebugVectorToMatlab(const std::string &varName, const std::vector<float> &data);
-
-    /**
-     * \brief Append vector to existing MATLAB array for real-time visualization (validation builds only)
-     * \param varName Variable name in MATLAB workspace to append to
-     * \param data Vector data to append
-     */
-    void appendDebugVectorToMatlab(const std::string &varName, const std::vector<float> &data);
-
-        /**
-     * \brief Append vector to existing MATLAB array for real-time visualization (validation builds only)
-     * \param varName Variable name in MATLAB workspace to append to
-     * \param data Vector data to append
-     */
-    void appendDebugVectorToMatlabDouble(const std::string &varName, const std::vector<double> &data);
-#endif
-
 
 };
 } // namespace OScofo
-
-#if COMPILE_WITH_MATLAB
-class MatlabHelper
-{
-public:
-    MatlabHelper()
-    {
-        // Don't initialize in constructor - do it lazily when needed
-        matlabEngine = nullptr;
-        initializationAttempted = false;
-        // ensureMatlabConnection();
-    }
-    ~MatlabHelper()
-    {
-        shutdownMatlabEngine();
-    }
-
-    // Lazy initialization - only attempt when actually needed
-    bool ensureMatlabConnection()
-    {
-        if (matlabEngine)
-            return true;
-
-        if (initializationAttempted)
-            return false; // Already tried and failed
-
-        initializationAttempted = true;
-        return initializeMatlabEngine();
-    }
-
-    // Find MatlabSession and connect to it
-    bool initializeMatlabEngine()
-    {
-        try
-        {
-            // Add debug output (you can remove this later)
-            std::cout << "Attempting to find MATLAB sessions..." << std::endl;
-
-            // Find MatlabSession and connect to it
-            auto matlabSessions = findMATLAB();
-            std::cout << "Found " << matlabSessions.size() << " MATLAB sessions" << std::endl;
-
-            if (!matlabSessions.empty())
-            {
-                std::cout << "Attempting to connect to first available session..." << std::endl;
-                matlabEngine = connectMATLAB(matlabSessions[0]);
-                std::cout << "Successfully connected to shared MATLAB session" << std::endl;
-                return true;
-            }
-            else
-            {
-                std::cout << "No shared sessions found, attempting to start new MATLAB..." << std::endl;
-                // If no shared session found, try starting a new one
-                matlabEngine = startMATLAB();
-                std::cout << "Successfully started new MATLAB session" << std::endl;
-                return true;
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cout << "MATLAB connection failed: " << e.what() << std::endl;
-            matlabEngine = nullptr;
-            return false;
-        }
-    };
-    void shutdownMatlabEngine()
-    {
-        try
-        {
-            if (matlabEngine)
-            {
-                // Terminate MATLAB session
-                terminateEngineClient();
-                matlabEngine.reset();
-            }
-        }
-        catch (const std::exception &e)
-        {
-            // Handle errors during shutdown gracefully
-            matlabEngine.reset();
-        }
-    };
-    void sendVectorToMatlabWorkspace(const std::string &varName, const std::vector<float> &data);
-    void sendVectorToMatlabWorkspace(const std::string &varName, const std::vector<float> &data, const std::vector<size_t> &dims);
-
-    // Append vector to existing MATLAB array using a MATLAB function
-    void appendVectorToMatlabArray(const std::string &varName, const std::vector<float> &data);
-    void appendVectorToMatlabArrayDouble(const std::string &varName, const std::vector<double> &data);
-    // Check if MATLAB is available
-    bool isMatlabAvailable() const { return matlabEngine != nullptr; }
-
-private:
-    std::unique_ptr<MATLABEngine> matlabEngine;
-    bool initializationAttempted;
-};
-#endif // COMPILE_WITH_MATLAB
