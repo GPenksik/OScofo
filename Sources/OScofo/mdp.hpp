@@ -3,6 +3,14 @@
 #include <unordered_map>
 #include <vector>
 
+// Only include export header when building as DLL with CMake
+#ifdef OSCOFO_BUILDING_DLL
+    #include "oscofo_export.h"
+#else
+    // Define empty export macro for static builds (Projucer)
+    #define OSCOFO_API
+#endif
+
 #include "states.hpp"
 
 // Performance timer - include header-only library
@@ -36,7 +44,7 @@ using PitchTemplateArray = std::vector<double>;
 // ╭─────────────────────────────────────╮
 // │     Markov Description Process      │
 // ╰─────────────────────────────────────╯
-class MDP {
+class OSCOFO_API MDP {
   public:
     MDP(double Sr, double WindowSize, double HopSize);
 

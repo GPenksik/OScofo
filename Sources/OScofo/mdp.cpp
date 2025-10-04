@@ -50,7 +50,7 @@ MDP::MDP(double Sr, double FFTSize, double HopSize) {
     m_TimeInPrevEvent = 0;
 
     SetTunning(440);
-    SetEnableTemporalCoherence(true);
+    SetEnableTemporalCoherence(false);
     if (m_EnableTemporalCoherence)
     {
         SetTemporalCoherenceSigmaFactor(0.2);

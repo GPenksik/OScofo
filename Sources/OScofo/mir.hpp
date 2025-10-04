@@ -6,6 +6,14 @@
 // Performance timer - include header-only library
 #include <performance_timer.h>
 
+// Only include export header when building as DLL with CMake
+#ifdef OSCOFO_BUILDING_DLL
+    #include "oscofo_export.h"
+#else
+    // Define empty export macro for static builds (Projucer)
+    #define OSCOFO_API
+#endif
+
 // Define COMPILE_OSCOFO_WITH_LOGGER to 1 to enable OScofo-specific logger features.
 #ifndef COMPILE_OSCOFO_WITH_LOGGER
 #define COMPILE_OSCOFO_WITH_LOGGER 0
@@ -29,7 +37,7 @@ namespace OScofo {
 // ╭─────────────────────────────────────╮
 // │     Music Information Retrieval     │
 // ╰─────────────────────────────────────╯
-class MIR {
+class OSCOFO_API MIR {
   public:
     MIR(float Sr, float WindowSize, float HopSize);
     ~MIR();
