@@ -57,15 +57,14 @@ class MacroState {
     std::vector<AudioState> SubStates;
 
     // Forward Algorithm
-    double InitProb;
     std::vector<double> Obs;
     std::vector<double> Forward;
     // std::vector<double> Norm;
     // std::vector<double> In;
-
+    
     // Audio Obs
     std::vector<double> Freqs;
-
+    
     // Time
     int UpperBound;
     double BPMExpected;
@@ -77,6 +76,7 @@ class MacroState {
     double IOIPhiN;
     double IOIHatPhiN;
     double Duration;
+    double InitProb = 0;
 
     double PhaseCoupling;
     double SyncStrength;

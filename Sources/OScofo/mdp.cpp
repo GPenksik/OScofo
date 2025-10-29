@@ -690,6 +690,7 @@ double MDP::GetPitchSimilarity(double Freq) {
 // ─────────────────────────────────────
 std::vector<double> MDP::GetInitialDistribution() {
     int Size = m_MaxScoreState - m_CurrentStateIndex;
+    // Add one to debug Init probability being negative during inference
     std::vector<double> InitialProb(Size);
 
     double Dur = 0;
@@ -827,8 +828,8 @@ double MDP::SemiMarkov(MacroState &StateJ, int CurrentState, int j, int T, int b
                 double TransProb = GetTransProbability(i, j) * StateI.Forward[PrevIndex];
                 // Scale this probability by distance of i to CurrentState.
                 // Turn this adjustment off while we are testing the temporal coherence model. 
-                // int distance = i - CurrentState;
-                // TransProb *= std::exp(-distance * distanceScaleFactor); // Example scaling factor
+                int distance = i - CurrentState;
+                TransProb *= std::exp(-distance * distanceScaleFactor); // Example scaling factor
                 MaxTrans = std::max(MaxTrans, TransProb);
             } else {
                 // CASE B: Self-transition (staying in same state j)
