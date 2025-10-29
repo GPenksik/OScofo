@@ -40,6 +40,11 @@ MIR::MIR(float Sr, float FftSize, float HopSize) {
     for (size_t i = 0; i < (size_t)m_FftSize; i++) {
         m_WindowingFunc[i] = 0.5 * (1.0 - cos(2.0 * M_PI * (int)i / ((double)m_FftSize - 1)));
     }
+
+#if COMPILE_OSCOFO_WITH_LOGGER
+    // Initialize HDF5 logger
+    dataLogger = std::make_unique<DataLogger>();
+#endif
 }
 
 // ─────────────────────────────────────
@@ -81,6 +86,11 @@ void MIR::SetError(const std::string &message) {
 void MIR::ClearError() {
     m_HasErrors = false;
     m_Errors.clear();
+}
+
+void MIR::PrintPerformanceTimingSummary() const
+{
+    m_PerformanceTimer.printSummary("MIR");
 }
 
 // ╭─────────────────────────────────────╮
@@ -125,6 +135,8 @@ void MIR::GetLoudness(std::vector<double> &In, Description &Desc) {
 
 // ─────────────────────────────────────
 void MIR::GetRMS(std::vector<double> &In, Description &Desc) {
+    MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetRMS");
+
     double sumOfSquares = 0.0;
     for (double sample : In) {
         sumOfSquares += sample * sample;
@@ -141,55 +153,73 @@ void MIR::GetRMS(std::vector<double> &In, Description &Desc) {
     } else {
         Desc.Silence = false;
     }
+#if COMPILE_OSCOFO_WITH_LOGGER
+    // Log audio level descriptors
+    logValue("RMS_Amp", Desc.Amp);
+    logValue("Silence", Desc.Silence ? 1.0f : 0.0f);
+#endif
 }
 
 // ─────────────────────────────────────
-void MIR::GetFFTDescriptions(std::vector<double> &In, Description &Desc) {
-    // real audio analisys
+void MIR::GetFFTDescriptions(std::vector<double> & In, Description & Desc) {
+    MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetFFTDescriptionsTotal");
+    
     size_t N = In.size();
     size_t NHalf = N / 2;
-
-    if (NHalf != Desc.SpectralPower.size()) {
-        Desc.SpectralPower.resize(NHalf);
-    }
-
-    if (NHalf != Desc.NormSpectralPower.size()) {
-        Desc.NormSpectralPower.resize(NHalf);
-    }
-
-    std::copy(In.begin(), In.end(), m_FFTIn);
-    fftw_execute(m_FFTPlan);
-
-    // FFT Mag
-    Desc.MaxAmp = 0;
-    double Real, Imag;
-    for (size_t i = 0; i < NHalf; i++) {
-        Real = m_FFTOut[i][0];
-        Imag = m_FFTOut[i][1];
-        Desc.SpectralPower[i] = sqrt(Real * Real + Imag * Imag) / (double)N;
-        if (Desc.SpectralPower[i] > Desc.MaxAmp) {
-            Desc.MaxAmp = Desc.SpectralPower[i];
+    {
+        MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "PrepareFFT");
+        // real audio analisys
+    
+        if (NHalf != Desc.SpectralPower.size()) {
+            Desc.SpectralPower.resize(NHalf);
         }
+    
+        if (NHalf != Desc.NormSpectralPower.size()) {
+            Desc.NormSpectralPower.resize(NHalf);
+        }
+    
+        std::copy(In.begin(), In.end(), m_FFTIn);
+    }
+    {
+        MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "ExecuteFFT");
+        fftw_execute(m_FFTPlan);
     }
 
-    // Normalize Spectral Power
-    double sum_power = std::accumulate(Desc.SpectralPower.begin(), Desc.SpectralPower.end(), 0.0);
-    for (size_t i = 0; i < NHalf; i++) {
-        Desc.NormSpectralPower[i] = (Desc.SpectralPower[i] + 1e-12) / (sum_power + 1e-12);
+    {
+        MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "PostProcessFFT");
+        // FFT Mag
+        Desc.MaxAmp = 0;
+        double Real, Imag;
+        for (size_t i = 0; i < NHalf; i++) {
+            Real = m_FFTOut[i][0];
+            Imag = m_FFTOut[i][1];
+            Desc.SpectralPower[i] = sqrt(Real * Real + Imag * Imag) / (double)N;
+            if (Desc.SpectralPower[i] > Desc.MaxAmp) {
+                Desc.MaxAmp = Desc.SpectralPower[i];
+            }
+        }
+    
+        // Normalize Spectral Power
+        double sum_power = std::accumulate(Desc.SpectralPower.begin(), Desc.SpectralPower.end(), 0.0);
+        for (size_t i = 0; i < NHalf; i++) {
+            Desc.NormSpectralPower[i] = (Desc.SpectralPower[i] + 1e-12) / (sum_power + 1e-12);
+        }
+    
+        const double mean = 1.0 / NHalf; // Sum is 1.0, so mean = 1/N
+        double variance = 0.0;
+        for (size_t i = 0; i < NHalf; i++) {
+            double diff = Desc.NormSpectralPower[i] - mean;
+            variance += diff * diff;
+        }
+        variance /= NHalf;
+        Desc.StdDev = std::sqrt(variance);
     }
-
-    const double mean = 1.0 / NHalf; // Sum is 1.0, so mean = 1/N
-    double variance = 0.0;
-    for (size_t i = 0; i < NHalf; i++) {
-        double diff = Desc.NormSpectralPower[i] - mean;
-        variance += diff * diff;
-    }
-    variance /= NHalf;
-    Desc.StdDev = std::sqrt(variance);
 }
 
 // ─────────────────────────────────────
-void MIR::GetSpectralFlux(Description &Desc) {
+void MIR::GetSpectralFlux(Description & Desc) {
+    MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetSpectralFlux");
+
     if (m_PreviousSpectralPower.empty()) {
         m_PreviousSpectralPower.resize(Desc.SpectralPower.size());
         std::copy(Desc.SpectralPower.begin(), Desc.SpectralPower.end(), m_PreviousSpectralPower.begin());
@@ -213,10 +243,15 @@ void MIR::GetSpectralFlux(Description &Desc) {
 // ╭─────────────────────────────────────╮
 // │            Main Function            │
 // ╰─────────────────────────────────────╯
-void MIR::GetDescription(std::vector<double> &In, Description &Desc) {
+void MIR::GetDescription(std::vector<double> & In, Description & Desc) {
+    MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "GetDescriptionTotal");
+
     // apply windowing function
-    for (size_t i = 0; i < (size_t)m_FftSize; i++) {
-        In[i] *= m_WindowingFunc[i];
+    {
+        MIR_PERF_TIMER_SCOPE(m_PerformanceTimer, "ApplyWindowing");
+        for (size_t i = 0; i < (size_t)m_FftSize; i++) {
+            In[i] *= m_WindowingFunc[i];
+        }
     }
 
     GetLoudness(In, Desc);
@@ -228,5 +263,45 @@ void MIR::GetDescription(std::vector<double> &In, Description &Desc) {
     if (m_SpectralFlux) {
         GetSpectralFlux(Desc);
     }
+}
+
+void MIR::logValue(const std::string &varName, float value) {
+#if COMPILE_OSCOFO_WITH_LOGGER
+    if (dataLogger) {
+        dataLogger->logValue(varName, value);
+    }
+#endif
+}
+
+void MIR::logValue(const std::string &varName, double value) {
+#if COMPILE_OSCOFO_WITH_LOGGER
+    if (dataLogger) {
+        dataLogger->logValue(varName, value);
+    }
+#endif
+}
+
+void MIR::logVector(const std::string &varName, const std::vector<float> &data) {
+#if COMPILE_OSCOFO_WITH_LOGGER
+    if (dataLogger) {
+        dataLogger->logVector(varName, data);
+    }
+#endif
+}
+
+void MIR::logVector(const std::string &varName, const std::vector<double> &data) {
+#if COMPILE_OSCOFO_WITH_LOGGER
+    if (dataLogger) {
+        dataLogger->logVector(varName, data);
+    }
+#endif
+}
+
+void MIR::exportLogsToHDF5(const std::string &filename) {
+#if COMPILE_OSCOFO_WITH_LOGGER
+    if (dataLogger) {
+        dataLogger->exportToHDF5(filename);
+    }
+#endif
 }
 } // namespace OScofo

@@ -1,5 +1,13 @@
 #pragma once
 
+// Only include export header when building as DLL with CMake
+#ifdef OSCOFO_BUILDING_DLL
+    #include <OScofo/oscofo_export.h>
+#else
+    // Define empty export macro for static builds (Projucer)
+    #define OSCOFO_API
+#endif
+
 #include <OScofo/mdp.hpp>
 #include <OScofo/mir.hpp>
 #include <OScofo/score.hpp>
@@ -19,9 +27,7 @@ extern "C" {
 
 namespace OScofo {
 
-class OScofo;
-
-class OScofo {
+class OSCOFO_API OScofo {
   public:
     OScofo(float Sr, float WindowSize, float HopSize);
 
@@ -40,6 +46,7 @@ class OScofo {
     double GetLiveBPM();
     int GetEventIndex();
     double GetKappa();
+    double GetBlockDuration();
     double GetdBValue();
     ActionVec GetEventActions(int Index);
     std::string GetLuaCode();
@@ -70,6 +77,7 @@ class OScofo {
     std::vector<std::string> GetErrorMessage();
     void SetError(const std::string &message);
     void ClearError();
+    void PrintPerformanceTimingSummary() const;
 
   private:
     MDP m_MDP;

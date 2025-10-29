@@ -3,6 +3,14 @@
 #include <string>
 #include <vector>
 
+// Only include export header when building as DLL with CMake
+#ifdef OSCOFO_BUILDING_DLL
+    #include "oscofo_export.h"
+#else
+    // Define empty export macro for static builds (Projucer)
+    #define OSCOFO_API
+#endif
+
 #include "states.hpp"
 #include <tree_sitter/api.h>
 
@@ -16,7 +24,7 @@ namespace OScofo {
 // │                Score                │
 // ╰─────────────────────────────────────╯
 
-class Score {
+class OSCOFO_API Score {
   public:
     States Parse(std::string ScoreFile);
     void SetTunning(double Tunning);
